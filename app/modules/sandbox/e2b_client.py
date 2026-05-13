@@ -11,7 +11,7 @@ log = get_logger("sandbox.e2b")
 
 
 class E2BClient:
-    """Wrapper around the E2B Code Interpreter SDK."""
+    """Wrapper around the E2B Code Interpreter SDK (v2.x)."""
 
     def __init__(self) -> None:
         settings = get_settings()
@@ -28,6 +28,7 @@ class E2BClient:
         """Run Python code in an isolated E2B sandbox.
 
         Returns a dict with stdout, stderr, exit_code, and session_id.
+        Compatible with e2b-code-interpreter >= 2.0.0.
         """
         if not self._api_key:
             log.warning("e2b_api_key_not_configured")
@@ -49,45 +50,45 @@ class E2BClient:
         try:
             from e2b_code_interpreter import Sandbox
 
-            sbx = await Sandbox.create_async(
+            # e2b-code-interpreter 2.x: create is async
+            sbx = await Sandbox.create(
                 api_key=self._api_key,
                 timeout=effective_timeout,
             )
 
-            # Install required packages
-            if packages:
-                install_code = f"import subprocess; subprocess.run(['pip', 'install', '-q', {', '.join(repr(p) for p in packages)}])"
-                await sbx.run_code(install_code)
+            try:
+                # Install required packages first
+                if packages:
+                    pkg_list = " ".join(packages)
+                    await sbx.run_code(f"import subprocess; subprocess.run(['pip', 'install', '-q', {', '.join(repr(p) for p in packages)}], capture_output=True)")
 
-            execution = await sbx.run_code(code)
+                # Execute the main code
+                execution = await sbx.run_code(code)
 
-            stdout = "\n".join(
-                r.text for r in execution.logs.stdout if r.text
-            )
-            stderr = "\n".join(
-                r.text for r in execution.logs.stderr if r.text
-            )
+                # e2b 2.x: execution.logs.stdout / .stderr are lists of OutputMessage
+                stdout_parts = []
+                stderr_parts = []
 
-            if execution_id:
-                if stdout:
-                    await emit(execution_id, SANDBOX_STDOUT, {"text": stdout[:2000]})
-                if stderr:
-                    await emit(execution_id, SANDBOX_STDERR, {"text": stderr[:2000]})
+                if hasattr(execution, "logs"):
+                    for item in (execution.logs.stdout or []):
+                        text = item.line if hasattr(item, "line") else str(item)
+                        stdout_parts.append(text)
+                    for item in (execution.logs.stderr or []):
+                        text = item.line if hasattr(item, "line") else str(item)
+                        stderr_parts.append(text)
+                elif hasattr(execution, "text"):
+                    # Some versions return a flat .text attribute
+                    stdout_parts.append(execution.text or "")
 
-            await sbx.kill()
+                stdout = "\n".join(stdout_parts)
+                stderr = "\n".join(stderr_parts)
+                has_error = bool(
+                    getattr(execution, "error", None)
+                    or getattr(execution, "errors", None)
+                )
 
-            result = {
-                "session_id": session_id,
-                "stdout": stdout,
-                "stderr": stderr,
-                "exit_code": 0 if not execution.error else 1,
-                "error": str(execution.error) if execution.error else None,
-                "duration_ms": int((time.monotonic() - start) * 1000),
-            }
-
-            # Persist session record
-            await self._persist_session(execution_id, session_id, result)
-            return result
+            finally:
+                await sbx.kill()
 
         except Exception as exc:
             log.error("e2b_execution_failed", error=str(exc), execution_id=execution_id)
@@ -99,6 +100,24 @@ class E2BClient:
                 "error": str(exc),
                 "duration_ms": int((time.monotonic() - start) * 1000),
             }
+
+        if execution_id:
+            if stdout:
+                await emit(execution_id, SANDBOX_STDOUT, {"text": stdout[:2000]})
+            if stderr:
+                await emit(execution_id, SANDBOX_STDERR, {"text": stderr[:2000]})
+
+        result = {
+            "session_id": session_id,
+            "stdout": stdout,
+            "stderr": stderr,
+            "exit_code": 1 if has_error else 0,
+            "error": str(getattr(execution, "error", "") or "") or None,
+            "duration_ms": int((time.monotonic() - start) * 1000),
+        }
+
+        await self._persist_session(execution_id, session_id, result)
+        return result
 
     async def _persist_session(
         self, execution_id: str, session_id: str, result: dict[str, Any]

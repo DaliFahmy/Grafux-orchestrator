@@ -31,6 +31,7 @@ class AgentRuntime:
             return {"error": "OpenAI API key not configured", "output": ""}
 
         from langchain_openai import ChatOpenAI
+        # langgraph-prebuilt is a required dep of langgraph>=1.0.0
         from langgraph.prebuilt import create_react_agent
 
         # Load agent memory

@@ -14,41 +14,35 @@ psycopg[binary,pool]==3.2.3
 # ── Redis / Celery ────────────────────────────────────────────────────────────
 celery[redis]==5.4.0
 redis==5.2.1
-kombu==5.4.2
 
 # ── LangGraph / LangChain ─────────────────────────────────────────────────────
-# These packages are tightly coupled and must be resolved together by pip.
-# Pin to minimum known-good versions; pip selects a mutually compatible set.
-langgraph>=0.2.56
-langgraph-checkpoint-postgres>=1.0.0
-langchain-openai>=0.2.14
-langchain-core>=0.3.27
-langchain-community>=0.3.14
+# langgraph 1.x requires langchain-core>=1.4.0; langchain-openai 1.x satisfies that.
+# Pinning each to a known-current floor; pip resolves the compatible patch set.
+langgraph>=1.0.0
+langgraph-checkpoint-postgres>=3.0.0
+langchain-openai>=1.0.0
+langchain-core>=1.4.0
 
 # ── AI / External APIs ────────────────────────────────────────────────────────
-openai==1.57.4
-httpx==0.28.1
-httpx-sse==0.4.0
+openai>=1.50.0
+httpx>=0.27.0,<1.0.0
 
 # ── E2B Code Interpreter ──────────────────────────────────────────────────────
-e2b-code-interpreter==1.0.3
+e2b-code-interpreter>=2.0.0
 
 # ── Research ──────────────────────────────────────────────────────────────────
-tavily-python==0.5.0
-firecrawl-py==1.5.0
+tavily-python>=0.5.0
+firecrawl-py>=0.0.16
 
 # ── Authentication ────────────────────────────────────────────────────────────
 pyjwt==2.10.1
 cryptography==44.0.0
 
 # ── WebSocket / Async ─────────────────────────────────────────────────────────
-websockets==14.1
-anyio==4.7.0
+websockets>=12.0
 
 # ── Observability ─────────────────────────────────────────────────────────────
 structlog==24.4.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
-python-dateutil==2.9.0
-pytz==2024.2
-tenacity==9.0.0
+tenacity>=8.0.0

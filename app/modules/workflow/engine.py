@@ -281,7 +281,8 @@ class WorkflowEngine:
         g.add_node("sandbox", sandbox_node)
         g.add_node("device", device_node)
 
-        g.set_entry_point("agent")
+        # LangGraph 1.x: set_entry_point is removed; use add_edge(START, ...)
+        g.add_edge(START, "agent")
 
         g.add_conditional_edges(
             "agent",
