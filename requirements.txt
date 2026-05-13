@@ -17,11 +17,13 @@ redis==5.2.1
 kombu==5.4.2
 
 # ── LangGraph / LangChain ─────────────────────────────────────────────────────
-langgraph==0.2.56
-langgraph-checkpoint-postgres==2.0.4
-langchain-openai==0.2.14
-langchain-core==0.3.25
-langchain-community==0.3.14
+# These packages are tightly coupled and must be resolved together by pip.
+# Pin to minimum known-good versions; pip selects a mutually compatible set.
+langgraph>=0.2.56
+langgraph-checkpoint-postgres>=1.0.0
+langchain-openai>=0.2.14
+langchain-core>=0.3.27
+langchain-community>=0.3.14
 
 # ── AI / External APIs ────────────────────────────────────────────────────────
 openai==1.57.4
