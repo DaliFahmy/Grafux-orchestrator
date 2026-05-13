@@ -1,28 +1,179 @@
 services:
+
+  # ── FastAPI Web Service ──────────────────────────────────────────────────────
   - type: web
     name: grafux-orchestrator
+    runtime: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ENVIRONMENT
+        value: production
+      - key: DEBUG
+        value: "false"
+      # ── Database ─────────────────────────────────────────────────────────────
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SYNC_URL
+        sync: false
+      # ── Redis ─────────────────────────────────────────────────────────────────
+      - key: REDIS_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      # ── Service Auth ──────────────────────────────────────────────────────────
+      - key: INTERNAL_SERVICE_SECRET
+        sync: false
+      # ── Grafux Services ───────────────────────────────────────────────────────
+      - key: BACKEND_URL
+        sync: false
+      - key: MCP_SERVICE_URL
+        sync: false
+      - key: DEVICES_SERVICE_URL
+        sync: false
+      - key: INTERACTION_SERVICE_URL
+        sync: false
+      # ── AI / External APIs ────────────────────────────────────────────────────
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+
+  # ── AI-Heavy Celery Worker ───────────────────────────────────────────────────
+  - type: worker
+    name: grafux-orchestrator-worker-ai
+    runtime: python
+    plan: standard
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A worker.celery_worker worker -Q ai_heavy -c 2 --loglevel=info
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SYNC_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: INTERNAL_SERVICE_SECRET
+        sync: false
+      - key: BACKEND_URL
+        sync: false
+      - key: MCP_SERVICE_URL
+        sync: false
+      - key: DEVICES_SERVICE_URL
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: FIRECRAWL_API_KEY
+        sync: false
+
+  # ── Research Worker ──────────────────────────────────────────────────────────
+  - type: worker
+    name: grafux-orchestrator-worker-research
     runtime: python
     plan: starter
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: uvicorn orchestrator_server:app --host 0.0.0.0 --port $PORT
-    healthCheckPath: /health
+    startCommand: celery -A worker.celery_worker worker -Q research -c 2 --loglevel=info
     envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
       - key: PYTHONUNBUFFERED
         value: "1"
-      - key: OPENAI_MODEL
-        value: gpt-4o
-      - key: AWS_REGION
-        value: us-east-1
-      - key: S3_BUCKET
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
         sync: false
       - key: OPENAI_API_KEY
         sync: false
-      - key: GEMINI_API_KEY
+      - key: TAVILY_API_KEY
         sync: false
-      - key: JWT_SECRET
+      - key: FIRECRAWL_API_KEY
         sync: false
-      - key: AWS_ACCESS_KEY_ID
+
+  # ── Sandbox Worker ────────────────────────────────────────────────────────────
+  - type: worker
+    name: grafux-orchestrator-worker-sandbox
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A worker.celery_worker worker -Q sandbox -c 2 --loglevel=info
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
         sync: false
-      - key: AWS_SECRET_ACCESS_KEY
+      - key: REDIS_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
+        sync: false
+      - key: E2B_API_KEY
+        sync: false
+
+  # ── Celery Beat Scheduler ────────────────────────────────────────────────────
+  - type: worker
+    name: grafux-orchestrator-beat
+    runtime: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -r requirements.txt
+    startCommand: celery -A worker.celery_worker beat --loglevel=info
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.12.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: REDIS_URL
+        sync: false
+      - key: CELERY_BROKER_URL
+        sync: false
+      - key: CELERY_RESULT_BACKEND
         sync: false

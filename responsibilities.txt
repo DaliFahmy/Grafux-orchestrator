@@ -1,0 +1,98 @@
+3. Grafux-orchestrator
+
+This is the AI Runtime Brain — a production-grade distributed execution engine.
+
+RESPONSIBILITIES
+
+AI Orchestration
+- LangGraph graph-based workflow execution
+- Multi-step AI pipeline orchestration
+- Conditional routing and decision logic
+- Resumable workflows via PostgreSQL checkpoints
+
+Agent Runtime
+- AI agent creation and execution (ReAct / tool-calling)
+- Agent memory (Redis short-term + PostgreSQL long-term)
+- Multi-agent coordination and task decomposition
+- Tool binding (MCP, research, sandbox, devices)
+
+Task Queue (Celery + Redis)
+- Distributed async task execution
+- Priority queues: ai_heavy, research, sandbox, scheduled, default
+- Automatic retries with exponential backoff
+- Celery Beat for scheduled/periodic workflows
+- Long-running job management and cancellation
+
+MCP Coordination
+- Tool discovery from Grafux-mcp service
+- Tool invocation with retry and timeout
+- Execution audit logging for all MCP calls
+
+Research Pipelines
+- Tavily web search integration
+- Firecrawl web scraping and crawling
+- Search → crawl → LLM summarize pipeline
+- Citation extraction and source tracking
+
+Sandbox Execution (E2B)
+- Isolated Python code execution
+- Package installation in sandbox
+- Real-time stdout/stderr streaming
+- Execution session lifecycle management
+
+Event Streaming
+- Redis pub/sub event bus
+- WebSocket fan-out to connected Grafux-app clients
+- Execution lifecycle events (started/step/log/complete/failed/cancelled)
+- Agent thoughts, MCP events, sandbox output, device events
+
+Device Coordination
+- HTTP client to Grafux-devices service
+- Device command dispatch
+- Device event relay
+
+Workflow Persistence
+- Execution state in PostgreSQL
+- Workflow definitions and templates
+- Step-by-step execution history
+- Structured execution logs
+- Execution checkpoints for recovery
+
+STACK
+
+Python + FastAPI (async)
+LangGraph (workflow engine + checkpointing)
+Celery (distributed task queue)
+Redis (broker + pub/sub + cache)
+PostgreSQL (execution state + audit)
+E2B (sandbox)
+Tavily + Firecrawl (research)
+OpenAI API
+
+IMPORTANT
+
+This service does NOT own:
+- User authentication (→ Grafux-backend)
+- JWT issuance (→ Grafux-backend)
+- Organizations / Projects / RBAC (→ Grafux-backend)
+- Marketplace / Billing / Portfolio (→ Grafux-backend)
+
+All JWTs are validated by delegating to Grafux-backend.
+Grafux-backend is the single source of truth for identity and permissions.
+Internal service communication uses X-Internal-Service-Secret header.
+
+COMMUNICATION
+
+Inbound:
+- POST /internal/executions/trigger  (from Grafux-backend)
+- WS /executions/{id}/stream         (from Grafux-app)
+- HTTP/REST                          (from authenticated clients)
+
+Outbound:
+- Grafux-backend  (JWT validation, project/org lookups)
+- Grafux-mcp      (tool discovery + invocation)
+- Grafux-devices  (device commands + events)
+- E2B             (sandbox execution)
+- Tavily          (web search)
+- Firecrawl       (web scraping)
+- OpenAI          (LLM calls)

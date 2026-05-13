@@ -1,0 +1,165 @@
+version: "3.9"
+
+# ── Shared environment ─────────────────────────────────────────────────────────
+x-env: &common-env
+  ENVIRONMENT: development
+  DEBUG: "true"
+  DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/grafux_orchestrator
+  DATABASE_SYNC_URL: postgresql+psycopg://postgres:postgres@postgres:5432/grafux_orchestrator
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  INTERNAL_SERVICE_SECRET: dev_secret_change_in_production
+  BACKEND_URL: ${BACKEND_URL:-http://host.docker.internal:8001}
+  MCP_SERVICE_URL: ${MCP_SERVICE_URL:-http://host.docker.internal:8002}
+  DEVICES_SERVICE_URL: ${DEVICES_SERVICE_URL:-http://host.docker.internal:8003}
+  OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+  OPENAI_MODEL: ${OPENAI_MODEL:-gpt-4o}
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  E2B_API_KEY: ${E2B_API_KEY:-}
+  TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+  FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-}
+
+services:
+
+  # ── Infrastructure ─────────────────────────────────────────────────────────
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: grafux_orchestrator
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ── Application ────────────────────────────────────────────────────────────
+
+  api:
+    build:
+      context: .
+      target: runtime
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    ports:
+      - "8000:8000"
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  worker_default:
+    build:
+      context: .
+      target: runtime
+    command: celery -A worker.celery_worker worker -Q default -c 4 --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  worker_ai:
+    build:
+      context: .
+      target: runtime
+    command: celery -A worker.celery_worker worker -Q ai_heavy -c 2 --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  worker_research:
+    build:
+      context: .
+      target: runtime
+    command: celery -A worker.celery_worker worker -Q research -c 2 --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  worker_sandbox:
+    build:
+      context: .
+      target: runtime
+    command: celery -A worker.celery_worker worker -Q sandbox -c 2 --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  beat:
+    build:
+      context: .
+      target: runtime
+    command: celery -A worker.celery_worker beat --loglevel=info
+    environment:
+      <<: *common-env
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+    restart: unless-stopped
+
+  # ── DB migrations (run once, then exit) ───────────────────────────────────
+  migrate:
+    build:
+      context: .
+      target: runtime
+    command: alembic upgrade head
+    environment:
+      <<: *common-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - migrate
+
+volumes:
+  postgres_data:
+  redis_data:

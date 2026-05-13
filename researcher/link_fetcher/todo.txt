@@ -1,0 +1,1 @@
+it fetch informtation on the internet about acertain link.
