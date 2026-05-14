@@ -79,11 +79,34 @@ class Settings(BaseSettings):
         return self.environment == "production"
 
     @property
+    def asyncpg_url(self) -> str:
+        """SQLAlchemy async URL using asyncpg driver.
+
+        Normalises whatever form DATABASE_URL arrives in (including the
+        ``postgres://`` scheme that Render provides by default).
+        """
+        import re
+        url = self.database_url
+        url = re.sub(r"^postgres://", "postgresql://", url)
+        url = re.sub(r"^postgresql\+psycopg://", "postgresql://", url)
+        if url.startswith("postgresql://"):
+            url = "postgresql+asyncpg://" + url[len("postgresql://"):]
+        return url
+
+    @property
     def psycopg_url(self) -> str:
-        """Raw psycopg v3 URL for LangGraph checkpointer (no driver prefix)."""
-        url = self.database_sync_url
-        if url.startswith("postgresql+psycopg://"):
-            return "postgresql://" + url[len("postgresql+psycopg://"):]
+        """psycopg v3 URL for LangGraph checkpointer and Alembic.
+
+        Normalises whatever form DATABASE_URL or DATABASE_SYNC_URL arrives in.
+        The checkpointer expects the raw ``postgresql://`` scheme without a
+        driver prefix.
+        """
+        import re
+        # Prefer the explicit sync URL if set to something other than default
+        url = self.database_sync_url or self.database_url
+        url = re.sub(r"^postgres://", "postgresql://", url)
+        url = re.sub(r"^postgresql\+asyncpg://", "postgresql://", url)
+        url = re.sub(r"^postgresql\+psycopg://", "postgresql://", url)
         return url
 
 

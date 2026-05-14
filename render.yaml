@@ -19,9 +19,10 @@ services:
       - key: DEBUG
         value: "false"
       # ── Database ─────────────────────────────────────────────────────────────
+      # Set this to the Internal Database URL from your Render PostgreSQL service.
+      # Accepted formats: postgres://, postgresql://, postgresql+asyncpg://
+      # The app normalises the scheme; DATABASE_SYNC_URL is not required.
       - key: DATABASE_URL
-        sync: false
-      - key: DATABASE_SYNC_URL
         sync: false
       # ── Redis ─────────────────────────────────────────────────────────────────
       - key: REDIS_URL
@@ -72,8 +73,6 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: DATABASE_URL
-        sync: false
-      - key: DATABASE_SYNC_URL
         sync: false
       - key: REDIS_URL
         sync: false
