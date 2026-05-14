@@ -136,14 +136,14 @@ class LogRepository:
         message: str,
         level: str = "info",
         step_id: str | None = None,
-        metadata: dict | None = None,
+        extra_data: dict | None = None,
     ) -> ExecutionLog:
         obj = ExecutionLog(
             execution_id=execution_id,
             message=message,
             level=level,
             step_id=step_id,
-            metadata=metadata or {},
+            extra_data=extra_data or {},
         )
         self._db.add(obj)
         await self._db.flush()

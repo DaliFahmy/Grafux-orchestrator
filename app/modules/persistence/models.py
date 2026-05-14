@@ -148,7 +148,7 @@ class ExecutionLog(Base):
     step_id: Mapped[str | None] = mapped_column(String(36))
     level: Mapped[str] = mapped_column(String(20), nullable=False, default="info")
     message: Mapped[str] = mapped_column(Text, nullable=False)
-    metadata: Mapped[dict] = mapped_column(JSON, default=dict)
+    extra_data: Mapped[dict] = mapped_column(JSON, default=dict)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
     execution: Mapped["Execution"] = relationship(

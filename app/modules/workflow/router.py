@@ -95,7 +95,7 @@ async def get_execution_logs(
             level=log_entry.level,
             message=log_entry.message,
             step_id=log_entry.step_id,
-            metadata=log_entry.metadata,
+            metadata=log_entry.extra_data,
             timestamp=log_entry.timestamp.isoformat(),
         )
         for log_entry in logs

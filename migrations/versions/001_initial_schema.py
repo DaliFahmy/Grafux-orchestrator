@@ -95,7 +95,7 @@ def upgrade() -> None:
         sa.Column("step_id", sa.String(36)),
         sa.Column("level", sa.String(20), nullable=False, server_default="info"),
         sa.Column("message", sa.Text, nullable=False),
-        sa.Column("metadata", sa.JSON, server_default="{}"),
+        sa.Column("extra_data", sa.JSON, server_default="{}"),
         sa.Column("timestamp", sa.DateTime, nullable=False, server_default=sa.func.now()),
     )
     op.create_index("ix_execution_logs_execution_id", "execution_logs", ["execution_id"])
