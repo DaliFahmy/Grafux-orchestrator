@@ -2,17 +2,19 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.core.celery_app import get_celery_app
-from app.dependencies import InternalService
+from app.dependencies import require_internal_service
+
+_internal = Depends(require_internal_service)
 
 router = APIRouter(prefix="/internal/queue", tags=["queue"])
 
 
 @router.get(
     "/status",
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def queue_status() -> dict[str, Any]:
     """Return current Celery worker and queue status."""
@@ -31,7 +33,7 @@ async def queue_status() -> dict[str, Any]:
 
 @router.post(
     "/retry/{execution_id}",
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def retry_execution(execution_id: str) -> dict[str, Any]:
     """Manually trigger a retry for a failed execution."""

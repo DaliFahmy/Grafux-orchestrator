@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
-from app.dependencies import CurrentUser, InternalService
+from app.dependencies import CurrentUser, require_internal_service
+
+_internal = Depends(require_internal_service)
 from app.modules.mcp.schemas import MCPInvokeRequest, MCPInvokeResponse, MCPTool
 from app.modules.mcp.service import MCPService
 
@@ -27,7 +29,7 @@ async def invoke_tool(
 
 @router.post(
     "/tools/refresh",
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def refresh_tool_cache() -> dict:
     from app.modules.mcp.discovery import MCPDiscovery

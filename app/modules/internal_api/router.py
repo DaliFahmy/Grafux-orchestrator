@@ -3,11 +3,13 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from fastapi import APIRouter, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import update
 
 from app.core.logging import get_logger
-from app.dependencies import DBSession, InternalService
+from app.dependencies import DBSession, require_internal_service
+
+_internal = Depends(require_internal_service)
 from app.modules.internal_api.health import get_health
 from app.modules.internal_api.schemas import (
     CancelExecutionResponse,
@@ -34,7 +36,7 @@ async def health_check() -> HealthResponse:
     "/executions/trigger",
     response_model=TriggerExecutionResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def trigger_execution(
     body: TriggerExecutionRequest,
@@ -90,7 +92,7 @@ async def trigger_execution(
 @router.get(
     "/executions/{execution_id}",
     response_model=ExecutionStatusResponse,
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def get_execution_status(
     execution_id: str,
@@ -114,7 +116,7 @@ async def get_execution_status(
 @router.post(
     "/executions/{execution_id}/cancel",
     response_model=CancelExecutionResponse,
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def cancel_execution(
     execution_id: str,
@@ -154,7 +156,7 @@ async def cancel_execution(
 
 @router.post(
     "/workflows/validate",
-    dependencies=[InternalService],  # type: ignore[list-item]
+    dependencies=[_internal],
 )
 async def validate_workflow(body: dict) -> dict:
     """Pre-flight validation of a workflow graph definition."""
