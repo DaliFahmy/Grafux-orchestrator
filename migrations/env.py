@@ -20,13 +20,13 @@ target_metadata = Base.metadata
 
 
 def _to_sync_psycopg_url(url: str) -> str:
-    """Normalize any PostgreSQL URL to use the psycopg v3 sync driver.
+    """Normalize any PostgreSQL URL to the psycopg v3 sync driver format.
 
-    Handles the three URL forms that commonly arrive via env vars:
-      postgres://...               → postgresql+psycopg://...  (Render default)
-      postgresql://...             → postgresql+psycopg://...
-      postgresql+asyncpg://...     → postgresql+psycopg://...  (our async app URL)
-      postgresql+psycopg://...     → unchanged (already correct)
+    Accepted input forms:
+      postgres://...           (Render's default format)
+      postgresql://...
+      postgresql+asyncpg://...
+      postgresql+psycopg://... (already correct — returned unchanged)
     """
     url = re.sub(r"^postgres://", "postgresql://", url)
     url = re.sub(r"^postgresql\+asyncpg://", "postgresql://", url)
@@ -35,16 +35,20 @@ def _to_sync_psycopg_url(url: str) -> str:
     return url
 
 
-# URL resolution priority:
-#   1. DATABASE_SYNC_URL  — explicit psycopg URL if set
-#   2. DATABASE_URL       — any PostgreSQL URL (Render sets this automatically
-#                           when a PostgreSQL database is linked to the service)
-#   3. alembic.ini        — local development fallback
+# Priority: DATABASE_SYNC_URL → DATABASE_URL → alembic.ini (blank in production)
 raw_url = (
-    os.environ.get("DATABASE_SYNC_URL")
-    or os.environ.get("DATABASE_URL")
-    or config.get_main_option("sqlalchemy.url")
+    os.environ.get("DATABASE_SYNC_URL", "").strip()
+    or os.environ.get("DATABASE_URL", "").strip()
+    or config.get_main_option("sqlalchemy.url") or ""
 )
+
+if not raw_url:
+    import sys
+    print(
+        "FATAL: No database URL found. Set DATABASE_URL in your environment.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 db_url = _to_sync_psycopg_url(raw_url)
 config.set_main_option("sqlalchemy.url", db_url)

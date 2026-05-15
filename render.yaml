@@ -7,7 +7,7 @@ services:
     plan: standard
     region: oregon
     buildCommand: pip install -r requirements.txt
-    startCommand: alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 2
+    startCommand: python start.py
     healthCheckPath: /health
     envVars:
       - key: PYTHON_VERSION
@@ -18,23 +18,30 @@ services:
         value: production
       - key: DEBUG
         value: "false"
-      # ── Database ─────────────────────────────────────────────────────────────
-      # Set this to the Internal Database URL from your Render PostgreSQL service.
-      # Accepted formats: postgres://, postgresql://, postgresql+asyncpg://
-      # The app normalises the scheme; DATABASE_SYNC_URL is not required.
+      # ── Database (auto-linked from managed PostgreSQL below) ───────────────
       - key: DATABASE_URL
-        sync: false
-      # ── Redis ─────────────────────────────────────────────────────────────────
+        fromDatabase:
+          name: grafux-orchestrator-db
+          property: internalConnectionString
+      # ── Redis (auto-linked from managed Redis below) ───────────────────────
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_BROKER_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_RESULT_BACKEND
-        sync: false
-      # ── Service Auth ──────────────────────────────────────────────────────────
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
+      # ── Secrets (set manually in Render dashboard) ─────────────────────────
       - key: INTERNAL_SERVICE_SECRET
         sync: false
-      # ── Grafux Services ───────────────────────────────────────────────────────
       - key: BACKEND_URL
         sync: false
       - key: MCP_SERVICE_URL
@@ -43,7 +50,6 @@ services:
         sync: false
       - key: INTERACTION_SERVICE_URL
         sync: false
-      # ── AI / External APIs ────────────────────────────────────────────────────
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL
@@ -56,6 +62,13 @@ services:
         sync: false
       - key: FIRECRAWL_API_KEY
         sync: false
+
+  # ── Redis ─────────────────────────────────────────────────────────────────────
+  - type: redis
+    name: grafux-orchestrator-redis
+    plan: starter
+    region: oregon
+    maxmemoryPolicy: noeviction
 
   # ── AI-Heavy Celery Worker ───────────────────────────────────────────────────
   - type: worker
@@ -73,13 +86,24 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: grafux-orchestrator-db
+          property: internalConnectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_BROKER_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_RESULT_BACKEND
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: INTERNAL_SERVICE_SECRET
         sync: false
       - key: BACKEND_URL
@@ -113,13 +137,24 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: grafux-orchestrator-db
+          property: internalConnectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_BROKER_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_RESULT_BACKEND
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: OPENAI_API_KEY
         sync: false
       - key: TAVILY_API_KEY
@@ -143,13 +178,24 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: grafux-orchestrator-db
+          property: internalConnectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_BROKER_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_RESULT_BACKEND
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: E2B_API_KEY
         sync: false
 
@@ -169,10 +215,28 @@ services:
       - key: ENVIRONMENT
         value: production
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: grafux-orchestrator-db
+          property: internalConnectionString
       - key: REDIS_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_BROKER_URL
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
       - key: CELERY_RESULT_BACKEND
-        sync: false
+        fromService:
+          type: redis
+          name: grafux-orchestrator-redis
+          property: connectionString
+
+# ── Managed PostgreSQL ────────────────────────────────────────────────────────
+databases:
+  - name: grafux-orchestrator-db
+    databaseName: grafux_orchestrator
+    plan: starter
+    region: oregon
