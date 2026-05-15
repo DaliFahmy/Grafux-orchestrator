@@ -116,6 +116,34 @@ async def _audit_log_middleware(request: Request, call_next):
     response = await call_next(request)
     if not request.url.path.startswith("/health"):
         log.info("http_request", status=response.status_code)
+
+    # #region agent log
+    if "/ws/session" in request.url.path or (response.status_code == 403 and not request.url.path.startswith("/internal")):
+        import json, time
+        _dbg_data = {
+            "path": request.url.path,
+            "method": request.method,
+            "http_status": response.status_code,
+            "query": str(request.url.query)[:200],
+            "upgrade_header": request.headers.get("upgrade", "none"),
+        }
+        log.info("[DBG-0f2551] middleware_saw_request", hypothesis="H-A", **_dbg_data)
+        try:
+            with open("debug-0f2551.log", "a") as _f:
+                _f.write(json.dumps({
+                    "sessionId": "0f2551",
+                    "id": f"log_{int(time.time()*1000)}_mw",
+                    "timestamp": int(time.time() * 1000),
+                    "location": "main.py:_audit_log_middleware",
+                    "message": "middleware_saw_request",
+                    "data": _dbg_data,
+                    "runId": "run1",
+                    "hypothesisId": "H-A",
+                }) + "\n")
+        except Exception:
+            pass
+    # #endregion
+
     return response
 
 
