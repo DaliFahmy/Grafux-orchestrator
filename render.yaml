@@ -18,18 +18,18 @@ services:
         value: production
       - key: DEBUG
         value: "false"
-      # ── Database (auto-linked from managed PostgreSQL below) ───────────────
+      # ── Database ───────────────────────────────────────────────────────────
       - key: DATABASE_URL
         fromDatabase:
           name: grafux-orchestrator-db
           property: internalConnectionString
-      # ── Redis (auto-linked from managed Key Value below) ──────────────────
+      # ── Redis ──────────────────────────────────────────────────────────────
       - key: REDIS_URL
         fromService:
           type: keyvalue
           name: grafux-orchestrator-redis
-          property: internalConnectionString
-      # ── Secrets (set manually in Render dashboard) ─────────────────────────
+          property: connectionString
+      # ── Secrets ────────────────────────────────────────────────────────────
       - key: INTERNAL_SERVICE_SECRET
         sync: false
       - key: BACKEND_URL
@@ -84,7 +84,7 @@ services:
         fromService:
           type: keyvalue
           name: grafux-orchestrator-redis
-          property: internalConnectionString
+          property: connectionString
       - key: INTERNAL_SERVICE_SECRET
         sync: false
       - key: BACKEND_URL
@@ -125,7 +125,7 @@ services:
         fromService:
           type: keyvalue
           name: grafux-orchestrator-redis
-          property: internalConnectionString
+          property: connectionString
       - key: OPENAI_API_KEY
         sync: false
       - key: TAVILY_API_KEY
@@ -156,7 +156,7 @@ services:
         fromService:
           type: keyvalue
           name: grafux-orchestrator-redis
-          property: internalConnectionString
+          property: connectionString
       - key: E2B_API_KEY
         sync: false
 
@@ -183,7 +183,7 @@ services:
         fromService:
           type: keyvalue
           name: grafux-orchestrator-redis
-          property: internalConnectionString
+          property: connectionString
 
 # ── Managed PostgreSQL ────────────────────────────────────────────────────────
 databases:
