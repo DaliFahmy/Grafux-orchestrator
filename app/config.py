@@ -1,9 +1,18 @@
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+def _redis_fallback(db: int) -> str:
+    """Return REDIS_URL with a specific DB index, used as a fallback when
+    CELERY_BROKER_URL / CELERY_RESULT_BACKEND are not explicitly set."""
+    base = os.environ.get("REDIS_URL", "redis://localhost:6379")
+    base = base.rstrip("/").rsplit("/", 1)[0]  # strip any existing db index
+    return f"{base}/{db}"
 
 
 class Settings(BaseSettings):
@@ -40,8 +49,8 @@ class Settings(BaseSettings):
     redis_max_connections: int = 20
 
     # ── Celery ────────────────────────────────────────────────────────────────
-    celery_broker_url: str = "redis://localhost:6379/1"
-    celery_result_backend: str = "redis://localhost:6379/2"
+    celery_broker_url: str = _redis_fallback(1)
+    celery_result_backend: str = _redis_fallback(2)
     celery_task_serializer: str = "json"
     celery_result_expires: int = 3600
 

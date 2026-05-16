@@ -28,17 +28,17 @@ services:
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       # ── Secrets (set manually in Render dashboard) ─────────────────────────
       - key: INTERNAL_SERVICE_SECRET
         sync: false
@@ -93,17 +93,17 @@ services:
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: INTERNAL_SERVICE_SECRET
         sync: false
       - key: BACKEND_URL
@@ -144,17 +144,17 @@ services:
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: OPENAI_API_KEY
         sync: false
       - key: TAVILY_API_KEY
@@ -185,17 +185,17 @@ services:
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: E2B_API_KEY
         sync: false
 
@@ -222,17 +222,17 @@ services:
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_BROKER_URL
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
       - key: CELERY_RESULT_BACKEND
         fromService:
           type: redis
           name: grafux-orchestrator-redis
-          property: connectionString
+          property: internalConnectionString
 
 # ── Managed PostgreSQL ────────────────────────────────────────────────────────
 databases:
