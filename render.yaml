@@ -23,20 +23,10 @@ services:
         fromDatabase:
           name: grafux-orchestrator-db
           property: internalConnectionString
-      # ── Redis (auto-linked from managed Redis below) ───────────────────────
+      # ── Redis (auto-linked from managed Key Value below) ──────────────────
       - key: REDIS_URL
         fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
+          type: keyvalue
           name: grafux-orchestrator-redis
           property: internalConnectionString
       # ── Secrets (set manually in Render dashboard) ─────────────────────────
@@ -63,12 +53,13 @@ services:
       - key: FIRECRAWL_API_KEY
         sync: false
 
-  # ── Redis ─────────────────────────────────────────────────────────────────────
-  - type: redis
+  # ── Key Value (Redis-compatible) ──────────────────────────────────────────────
+  - type: keyvalue
     name: grafux-orchestrator-redis
     plan: starter
     region: oregon
     maxmemoryPolicy: noeviction
+    ipAllowList: [] # internal connections only
 
   # ── AI-Heavy Celery Worker ───────────────────────────────────────────────────
   - type: worker
@@ -91,17 +82,7 @@ services:
           property: internalConnectionString
       - key: REDIS_URL
         fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
+          type: keyvalue
           name: grafux-orchestrator-redis
           property: internalConnectionString
       - key: INTERNAL_SERVICE_SECRET
@@ -142,17 +123,7 @@ services:
           property: internalConnectionString
       - key: REDIS_URL
         fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
+          type: keyvalue
           name: grafux-orchestrator-redis
           property: internalConnectionString
       - key: OPENAI_API_KEY
@@ -183,17 +154,7 @@ services:
           property: internalConnectionString
       - key: REDIS_URL
         fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
+          type: keyvalue
           name: grafux-orchestrator-redis
           property: internalConnectionString
       - key: E2B_API_KEY
@@ -220,17 +181,7 @@ services:
           property: internalConnectionString
       - key: REDIS_URL
         fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_BROKER_URL
-        fromService:
-          type: redis
-          name: grafux-orchestrator-redis
-          property: internalConnectionString
-      - key: CELERY_RESULT_BACKEND
-        fromService:
-          type: redis
+          type: keyvalue
           name: grafux-orchestrator-redis
           property: internalConnectionString
 

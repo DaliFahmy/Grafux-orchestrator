@@ -1,18 +1,10 @@
 from __future__ import annotations
 
-import os
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-
-def _redis_fallback(db: int) -> str:
-    """Return REDIS_URL with a specific DB index, used as a fallback when
-    CELERY_BROKER_URL / CELERY_RESULT_BACKEND are not explicitly set."""
-    base = os.environ.get("REDIS_URL", "redis://localhost:6379")
-    base = base.rstrip("/").rsplit("/", 1)[0]  # strip any existing db index
-    return f"{base}/{db}"
 
 
 class Settings(BaseSettings):
@@ -49,10 +41,21 @@ class Settings(BaseSettings):
     redis_max_connections: int = 20
 
     # ── Celery ────────────────────────────────────────────────────────────────
-    celery_broker_url: str = _redis_fallback(1)
-    celery_result_backend: str = _redis_fallback(2)
+    # These default to redis_url when not explicitly set via env vars.
+    # Managed Redis providers (e.g. Render Key Value) only expose database 0,
+    # so we share the same Redis instance for broker, backend, and app cache.
+    celery_broker_url: str = ""
+    celery_result_backend: str = ""
     celery_task_serializer: str = "json"
     celery_result_expires: int = 3600
+
+    @model_validator(mode="after")
+    def _derive_celery_urls(self) -> "Settings":
+        if not self.celery_broker_url:
+            self.celery_broker_url = self.redis_url
+        if not self.celery_result_backend:
+            self.celery_result_backend = self.redis_url
+        return self
 
     # ── AI ────────────────────────────────────────────────────────────────────
     openai_api_key: str = ""
