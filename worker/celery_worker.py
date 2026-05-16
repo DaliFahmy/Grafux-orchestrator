@@ -16,7 +16,9 @@ configure_logging()
 configure_beat_schedule()
 
 # Expose the Celery app for the `-A` flag
-app = get_celery_app()
+# Named `celery` so Celery's -A auto-discovery finds it, and to avoid
+# being overwritten by `import app.modules.queue.tasks` below.
+celery = get_celery_app()
 
 # Ensure all tasks are registered
 import app.modules.queue.tasks  # noqa: F401, E402
