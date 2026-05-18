@@ -262,7 +262,7 @@ class _OrchestratorSession:
                         if chunk is None:
                             break
                         await gemini.send_realtime_input(
-                            media=genai_types.Blob(
+                            audio=genai_types.Blob(
                                 data=chunk,
                                 mime_type="audio/pcm;rate=16000",
                             )
