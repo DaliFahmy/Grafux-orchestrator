@@ -11,7 +11,9 @@ from app.core.redis import get_redis_client
 log = get_logger("core.security")
 
 _AUTH_CACHE_PREFIX = "auth:token:"
-_INTERNAL_HEADER = "X-Internal-Service-Secret"
+_INTERNAL_KEY_HEADER = "X-Internal-Service-Key"
+_INTERNAL_NAME_HEADER = "X-Service-Name"
+_SERVICE_NAME = "grafux-orchestrator"
 
 
 def _token_cache_key(token: str) -> str:
@@ -82,7 +84,10 @@ async def verify_jwt(token: str) -> dict | None:
         async with httpx.AsyncClient(timeout=5.0) as client:
             resp = await client.post(
                 target_url,
-                headers={_INTERNAL_HEADER: settings.internal_service_secret},
+                headers={
+                    _INTERNAL_KEY_HEADER: settings.internal_service_secret,
+                    _INTERNAL_NAME_HEADER: _SERVICE_NAME,
+                },
                 json={"token": token},
             )
             # #region agent log
