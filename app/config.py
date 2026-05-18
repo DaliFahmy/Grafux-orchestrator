@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-4o"
     openai_embedding_model: str = "text-embedding-3-small"
     gemini_api_key: str = ""
-    gemini_live_model: str = "gemini-live-2.5-flash-native-audio"
+    gemini_live_model: str = "gemini-3.1-flash-live-preview"
 
     # ── External Services ─────────────────────────────────────────────────────
     e2b_api_key: str = ""
