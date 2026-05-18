@@ -237,10 +237,7 @@ class _OrchestratorSession:
             from google import genai as google_genai
             from google.genai import types as genai_types
 
-            client = google_genai.Client(
-                api_key=settings.gemini_api_key,
-                http_options={"api_version": "v1alpha"},
-            )
+            client = google_genai.Client(api_key=settings.gemini_api_key)
             live_config = genai_types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=genai_types.SpeechConfig(
@@ -252,8 +249,10 @@ class _OrchestratorSession:
                 ),
             )
 
+            # Model name is configurable; default is the current GA Live model.
+            live_model = settings.gemini_live_model
             async with client.aio.live.connect(
-                model="gemini-2.0-flash-live-001",
+                model=live_model,
                 config=live_config,
             ) as gemini:
 
