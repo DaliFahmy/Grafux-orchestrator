@@ -43,14 +43,14 @@ async def verify_jwt(token: str) -> dict | None:
                     "location": "core/security.py:verify_jwt",
                     "message": msg,
                     "data": data,
-                    "runId": "run1",
+                    "runId": "post-fix",
                     "hypothesisId": hyp,
                 }) + "\n")
         except Exception:
             pass
     _dbg_write("verify_jwt_called", {
         "backend_url": settings.backend_url,
-        "target_url": f"{settings.backend_url}/internal/auth/verify",
+        "target_url": f"{settings.backend_url}/api/internal/auth/validate",
         "token_prefix": token[:20] + "...",
     }, "H-B")
     # #endregion
@@ -76,34 +76,41 @@ async def verify_jwt(token: str) -> dict | None:
             pass
 
     # Delegate validation to Grafux-backend
+    # Correct endpoint: POST /api/internal/auth/validate (token in body)
+    target_url = f"{settings.backend_url}/api/internal/auth/validate"
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get(
-                f"{settings.backend_url}/internal/auth/verify",
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    _INTERNAL_HEADER: settings.internal_service_secret,
-                },
+            resp = await client.post(
+                target_url,
+                headers={_INTERNAL_HEADER: settings.internal_service_secret},
+                json={"token": token},
             )
             # #region agent log
             _dbg_write("backend_auth_response", {
-                "url": f"{settings.backend_url}/internal/auth/verify",
+                "url": target_url,
                 "http_status": resp.status_code,
                 "body_snippet": resp.text[:200],
             }, "H-B")
             # #endregion
             if resp.status_code != 200:
-                log.warning(
-                    "jwt_verification_failed",
-                    status=resp.status_code,
-                )
+                log.warning("jwt_verification_failed", status=resp.status_code, url=target_url)
                 return None
 
-            payload: dict = resp.json()
+            body = resp.json()
+            data = body.get("data", {})
+            if not data.get("valid"):
+                log.warning("jwt_invalid", url=target_url)
+                return None
+
+            payload: dict = {
+                "user_id": data.get("user_id"),
+                "email": data.get("email"),
+                "valid": True,
+            }
 
     except httpx.RequestError as exc:
         # #region agent log
-        _dbg_write("backend_auth_request_error", {"error": str(exc)}, "H-C")
+        _dbg_write("backend_auth_request_error", {"error": str(exc), "url": target_url}, "H-C")
         # #endregion
         log.error("backend_auth_unreachable", error=str(exc))
         return None

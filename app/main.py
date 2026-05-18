@@ -85,6 +85,7 @@ def create_app() -> FastAPI:
     from app.modules.devices.router import router as devices_router
     from app.modules.agent.router import router as agent_router
     from app.modules.queue.router import router as queue_router
+    from app.modules.session.router import router as session_router
 
     app.include_router(internal_router)
     app.include_router(workflow_router)
@@ -95,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(devices_router)
     app.include_router(agent_router)
     app.include_router(queue_router)
+    app.include_router(session_router)
 
     # ── Root health check (unauthenticated — for load balancers) ───────────────
     @app.get("/health", include_in_schema=False)
