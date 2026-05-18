@@ -189,5 +189,5 @@ services:
 databases:
   - name: grafux-orchestrator-db
     databaseName: grafux_orchestrator
-    plan: basic_256mb
+    plan: basic-256mb
     region: oregon
