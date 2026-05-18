@@ -50,25 +50,6 @@ async def ws_session(
         project_id=project_id,
     )
 
-    # #region agent log
-    import time as _time
-    try:
-        with open("debug-0f2551.log", "a") as _f:
-            _f.write(json.dumps({
-                "sessionId": "0f2551",
-                "id": f"log_{int(_time.time()*1000)}_sess",
-                "timestamp": int(_time.time() * 1000),
-                "location": "session/router.py:ws_session",
-                "message": "ws_session_accepted",
-                "data": {"session_id": session_id, "user_id": user_id, "project_id": project_id},
-                "runId": "post-fix",
-                "hypothesisId": "H-A",
-            }) + "\n")
-    except Exception:
-        pass
-    log.info("[DBG-0f2551] ws_session_accepted", session_id=session_id, user_id=user_id, hypothesis="H-A", run="post-fix")
-    # #endregion
-
     await _send(websocket, {"type": "session_ready", "session_id": session_id})
 
     session = _OrchestratorSession(
@@ -256,7 +237,10 @@ class _OrchestratorSession:
             from google import genai as google_genai
             from google.genai import types as genai_types
 
-            client = google_genai.Client(api_key=settings.gemini_api_key)
+            client = google_genai.Client(
+                api_key=settings.gemini_api_key,
+                http_options={"api_version": "v1alpha"},
+            )
             live_config = genai_types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
                 speech_config=genai_types.SpeechConfig(

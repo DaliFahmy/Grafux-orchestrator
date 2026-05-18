@@ -103,20 +103,11 @@ async def verify_jwt(token: str) -> dict | None:
     redis = get_redis_client()
     cache_key = _token_cache_key(token)
 
-    # #region agent log
-    import time as _time_mod
-    def _dbg(msg: str, data: dict) -> None:
-        log.info(f"[DBG-0f2551] {msg}", **data, run="post-fix2")
-    _dbg("verify_jwt_called", {"token_prefix": token[:20] + "..."})
-    # #endregion
-
     # Check Redis cache first
     try:
         cached = await redis.get(cache_key)
     except Exception as _redis_exc:
-        # #region agent log
-        _dbg("redis_error", {"error": str(_redis_exc)})
-        # #endregion
+        log.warning("redis_cache_error", error=str(_redis_exc))
         cached = None
 
     if cached:
@@ -128,13 +119,7 @@ async def verify_jwt(token: str) -> dict | None:
     # Verify the JWT directly — no backend roundtrip
     try:
         payload = await _verify_supabase_jwt(token)
-        # #region agent log
-        _dbg("jwt_verified", {"sub": payload.get("sub"), "alg": "direct"})
-        # #endregion
     except Exception as exc:
-        # #region agent log
-        _dbg("jwt_verify_failed", {"error": str(exc)})
-        # #endregion
         log.warning("jwt_verification_failed", error=str(exc))
         return None
 
