@@ -37,20 +37,26 @@ class Settings(BaseSettings):
     database_pool_timeout: int = 30
 
     # ── Redis ─────────────────────────────────────────────────────────────────
-    redis_url: str = "redis://localhost:6379/0"
+    # REDIS_URL can be set directly, or constructed from REDIS_HOST + REDIS_PORT
+    # (Render Key Value exposes host/port as the most reliable fromService props).
+    redis_url: str = ""
+    redis_host: str = "localhost"
+    redis_port: int = 6379
     redis_max_connections: int = 20
 
     # ── Celery ────────────────────────────────────────────────────────────────
-    # These default to redis_url when not explicitly set via env vars.
-    # Managed Redis providers (e.g. Render Key Value) only expose database 0,
-    # so we share the same Redis instance for broker, backend, and app cache.
+    # Derived from redis_url in the validator below; can be overridden via env.
     celery_broker_url: str = ""
     celery_result_backend: str = ""
     celery_task_serializer: str = "json"
     celery_result_expires: int = 3600
 
     @model_validator(mode="after")
-    def _derive_celery_urls(self) -> "Settings":
+    def _derive_redis_and_celery_urls(self) -> "Settings":
+        # Build redis_url from host/port when not provided as a full URL
+        if not self.redis_url:
+            self.redis_url = f"redis://{self.redis_host}:{self.redis_port}/0"
+        # Celery broker and backend default to the same Redis instance
         if not self.celery_broker_url:
             self.celery_broker_url = self.redis_url
         if not self.celery_result_backend:
