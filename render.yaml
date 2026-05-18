@@ -22,7 +22,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: grafux-orchestrator-db
-          property: internalConnectionString
+          property: connectionString
       # ── Redis ──────────────────────────────────────────────────────────────
       - key: REDIS_URL
         fromService:
@@ -79,7 +79,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: grafux-orchestrator-db
-          property: internalConnectionString
+          property: connectionString
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -120,7 +120,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: grafux-orchestrator-db
-          property: internalConnectionString
+          property: connectionString
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -151,7 +151,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: grafux-orchestrator-db
-          property: internalConnectionString
+          property: connectionString
       - key: REDIS_URL
         fromService:
           type: keyvalue
@@ -178,7 +178,7 @@ services:
       - key: DATABASE_URL
         fromDatabase:
           name: grafux-orchestrator-db
-          property: internalConnectionString
+          property: connectionString
       - key: REDIS_URL
         fromService:
           type: keyvalue
