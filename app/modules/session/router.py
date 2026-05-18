@@ -261,39 +261,36 @@ class _OrchestratorSession:
                         chunk = await self._audio_queue.get()
                         if chunk is None:
                             break
-                        await gemini.send(
-                            input={
-                                "realtime_input": {
-                                    "media_chunks": [
-                                        {
-                                            "data": chunk,
-                                            "mime_type": "audio/pcm;rate=16000",
-                                        }
-                                    ]
-                                }
-                            }
+                        await gemini.send_realtime_input(
+                            media=genai_types.Blob(
+                                data=chunk,
+                                mime_type="audio/pcm;rate=16000",
+                            )
                         )
 
                 async def _stream_from_gemini() -> None:
-                    async for response in gemini.receive():
-                        if not self._voice_active:
-                            break
-                        # Audio data comes as bytes on the response
-                        audio_bytes: bytes | None = None
-                        if hasattr(response, "data"):
-                            audio_bytes = response.data
-                        elif hasattr(response, "server_content"):
-                            sc = response.server_content
-                            if hasattr(sc, "model_turn") and sc.model_turn:
-                                for part in sc.model_turn.parts:
+                    import base64
+                    # receive() yields until turn_complete; loop for continuous streaming
+                    while self._voice_active:
+                        async for response in gemini.receive():
+                            if not self._voice_active:
+                                return
+                            audio_bytes: bytes | None = None
+                            # Direct .data attribute
+                            if hasattr(response, "data") and isinstance(response.data, bytes):
+                                audio_bytes = response.data
+                            # Parts inside server_content.model_turn
+                            elif response.server_content and response.server_content.model_turn:
+                                for part in response.server_content.model_turn.parts:
                                     if hasattr(part, "inline_data") and part.inline_data:
-                                        audio_bytes = part.inline_data.data
+                                        raw = part.inline_data.data
+                                        audio_bytes = base64.b64decode(raw) if isinstance(raw, str) else raw
                                         break
-                        if audio_bytes:
-                            try:
-                                await self._ws.send_bytes(audio_bytes)
-                            except Exception:
-                                break
+                            if audio_bytes:
+                                try:
+                                    await self._ws.send_bytes(audio_bytes)
+                                except Exception:
+                                    return
 
                 await asyncio.gather(_forward_to_gemini(), _stream_from_gemini())
 
