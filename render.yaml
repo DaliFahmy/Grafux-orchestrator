@@ -32,6 +32,8 @@ services:
       # ── Secrets ────────────────────────────────────────────────────────────
       - key: INTERNAL_SERVICE_SECRET
         sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
       - key: BACKEND_URL
         sync: false
       - key: MCP_SERVICE_URL

@@ -81,6 +81,8 @@ class Settings(BaseSettings):
 
     # ── Security ──────────────────────────────────────────────────────────────
     jwt_algorithm: str = "HS256"
+    # Supabase JWT secret — used as HS256 fallback; ES256 tokens use JWKS auto-discovery
+    supabase_jwt_secret: str = ""
     auth_cache_ttl: int = 60  # seconds to cache validated tokens in Redis
 
     # ── Execution Limits ──────────────────────────────────────────────────────
