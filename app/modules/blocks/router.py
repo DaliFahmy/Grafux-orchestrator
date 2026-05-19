@@ -84,40 +84,40 @@ async def generate_topic_block(
     name = body.topic_name.replace(" ", "_")
     cat = body.category
 
-    system_prompt = (
-        "You are a Grafux block generator. Given a topic description, generate a structured "
-        "topic block as a JSON object in EXACTLY this format (no extra keys, no markdown):\n"
-        '{\n'
-        '  "tool_calls": [\n'
-        '    {\n'
-        '      "id": 1,\n'
-        '      "jsonrpc": "2.0",\n'
-        '      "method": "tools/call",\n'
-        '      "params": {\n'
-        f'        "name": "{name}",\n'
-        f'        "block_id": "{uuid.uuid4().hex[:8]}",\n'
-        '        "block_type": "topics",\n'
-        '        "x": 0,\n'
-        '        "y": 0,\n'
-        '        "input_ports": [\n'
-        '          {"port_name": "description", "port_content": "<the description text>", '
-        f'"port_path": "data/topics/{cat}/{name}/inputs/description.txt"}\n'
-        '        ],\n'
-        '        "output_ports": [\n'
-        '          {"port_name": "<output_name>", "port_content": "<actual value>", '
-        f'"port_path": "data/topics/{cat}/{name}/outputs/<output_name>.txt"}\n'
-        '        ]\n'
-        '      }\n'
-        '    }\n'
-        '  ],\n'
-        '  "connections": []\n'
-        '}\n\n'
-        "Rules:\n"
-        "- Generate meaningful output_ports based on the description (extract real data values)\n"
-        "- Use lowercase_with_underscores for all port names\n"
-        f"- Keep port_path prefix as data/topics/{cat}/{name}/ substituting actual port names\n"
-        "- Output ONLY valid JSON — no markdown fences, no explanation"
-    )
+    block_id_example = uuid.uuid4().hex[:8]
+    system_prompt = f"""\
+You are a Grafux block generator. Given a topic description, generate a structured \
+topic block as a JSON object in EXACTLY this format (no extra keys, no markdown):
+{{
+  "tool_calls": [
+    {{
+      "id": 1,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {{
+        "name": "{name}",
+        "block_id": "{block_id_example}",
+        "block_type": "topics",
+        "x": 0,
+        "y": 0,
+        "input_ports": [
+          {{"port_name": "description", "port_content": "<the description text>", "port_path": "data/topics/{cat}/{name}/inputs/description.txt"}}
+        ],
+        "output_ports": [
+          {{"port_name": "<output_name>", "port_content": "<actual value>", "port_path": "data/topics/{cat}/{name}/outputs/<output_name>.txt"}}
+        ]
+      }}
+    }}
+  ],
+  "connections": []
+}}
+
+Rules:
+- Generate meaningful output_ports based on the description (extract real data values)
+- Use lowercase_with_underscores for all port names
+- Keep port_path prefix as data/topics/{cat}/{name}/ substituting actual port names
+- Output ONLY valid JSON — no markdown fences, no explanation\
+"""
 
     user_message = f"Topic name: {name}\nCategory: {cat}\n"
     if body.inputs:
