@@ -98,6 +98,7 @@ class _OrchestratorSession:
         self._history: list[dict[str, Any]] = []
         self._canvas_state: dict[str, Any] = {}
         self._active_blocks: list[Any] = []
+        self._saved_library: list[Any] = []
         self._voice_active = False
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._voice_task: asyncio.Task | None = None
@@ -146,12 +147,16 @@ class _OrchestratorSession:
                 self._canvas_state = data["canvas_state"]
             if data.get("active_blocks"):
                 self._active_blocks = data["active_blocks"]
+            if data.get("saved_library") is not None:
+                self._saved_library = data["saved_library"]
             text = data.get("text", "").strip()
             if text:
                 await self._run_text_turn(text)
 
         elif msg_type == "canvas_update":
             self._canvas_state = data.get("canvas_state", self._canvas_state)
+            if data.get("saved_library") is not None:
+                self._saved_library = data["saved_library"]
 
         elif msg_type == "set_active_blocks":
             self._active_blocks = data.get("blocks", self._active_blocks)
@@ -176,23 +181,42 @@ class _OrchestratorSession:
 
         from app.prompts import get_system_prompt
         raw_prompt = get_system_prompt("chat_assistant")
-        system_parts = [raw_prompt]
+
+        # Build DIAGRAM_CONTEXT from whatever the client has sent
+        diagram_ctx_parts: list[str] = []
         if self._canvas_state:
-            system_parts.append(f"Current canvas: {json.dumps(self._canvas_state)[:2000]}")
+            diagram_ctx_parts.append(
+                f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:3000]}"
+            )
+        if self._saved_library:
+            lib_lines = [
+                f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
+                for e in self._saved_library
+            ]
+            diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines))
+        diagram_context = (
+            "\n\n".join(diagram_ctx_parts)
+            if diagram_ctx_parts
+            else "No diagram loaded yet."
+        )
+        system_prompt = raw_prompt.replace("{DIAGRAM_CONTEXT}", diagram_context)
+
+        system_parts = [system_prompt]
         if self._active_blocks:
             system_parts.append(f"Active blocks: {json.dumps(self._active_blocks)[:500]}")
 
         # region agent log
         _dlog("system_prompt_built", {
             "has_canvas": bool(self._canvas_state),
+            "has_saved_library": bool(self._saved_library),
             "has_active_blocks": bool(self._active_blocks),
             "diagram_context_placeholder_present": "{DIAGRAM_CONTEXT}" in raw_prompt,
-            "prompt_snippet": raw_prompt[:200]
+            "diagram_context_snippet": diagram_context[:200],
         }, "H-B")
         # endregion
 
         messages: list[dict[str, Any]] = [
-            {"role": "system", "content": " ".join(system_parts)},
+            {"role": "system", "content": "\n\n".join(system_parts)},
             *self._history,
         ]
 
@@ -215,12 +239,26 @@ class _OrchestratorSession:
             _dlog("full_text_before_parse", {
                 "has_actions_tag": "##ACTIONS##" in full_text,
                 "tail_200": full_text[-200:] if len(full_text) > 200 else full_text,
-                "length": len(full_text)
+                "length": len(full_text),
             }, "H-A")
             # endregion
 
-            self._history.append({"role": "assistant", "content": full_text})
-            await _send(self._ws, {"type": "turn_complete", "full_text": full_text, "actions": []})
+            # Parse ##ACTIONS## tag from the end of the model response
+            display_text = full_text
+            actions: list[Any] = []
+            marker = "##ACTIONS##"
+            idx = full_text.rfind(marker)
+            if idx != -1:
+                json_str = full_text[idx + len(marker):].strip()
+                display_text = full_text[:idx].rstrip()
+                try:
+                    parsed = json.loads(json_str)
+                    actions = parsed.get("actions", [])
+                except Exception:
+                    pass
+
+            self._history.append({"role": "assistant", "content": display_text})
+            await _send(self._ws, {"type": "turn_complete", "full_text": display_text, "actions": actions})
 
         except Exception as exc:
             log.error("ai_turn_error", session_id=self._session_id, error=str(exc))
@@ -275,8 +313,46 @@ class _OrchestratorSession:
             from google.genai import types as genai_types
 
             client = google_genai.Client(api_key=settings.gemini_api_key)
+
+            # Build voice system prompt — reuse chat_assistant so Gemini responds
+            # conversationally while appending ##ACTIONS## when needed
+            from app.prompts import get_system_prompt
+            raw_chat_prompt = get_system_prompt("chat_assistant")
+            voice_context_parts: list[str] = []
+            if self._canvas_state:
+                voice_context_parts.append(
+                    f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:3000]}"
+                )
+            if self._active_blocks:
+                voice_context_parts.append(
+                    f"Active blocks:\n{json.dumps(self._active_blocks)[:500]}"
+                )
+            if self._saved_library:
+                lib_lines = [
+                    f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
+                    for e in self._saved_library
+                ]
+                voice_context_parts.append("Saved block library:\n" + "\n".join(lib_lines))
+            voice_context = (
+                "\n\n".join(voice_context_parts) if voice_context_parts else "No diagram loaded."
+            )
+            voice_system = raw_chat_prompt.replace("{DIAGRAM_CONTEXT}", voice_context)
+
+            # region agent log
+            _dlog("voice_start", {
+                "has_canvas": bool(self._canvas_state),
+                "has_active_blocks": bool(self._active_blocks),
+                "response_modalities": ["AUDIO", "TEXT"],
+                "system_prompt_sent": True,
+                "system_snippet": voice_system[:150],
+            }, "H-C")
+            # endregion
+
             live_config = genai_types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
+                response_modalities=["AUDIO", "TEXT"],
+                system_instruction=genai_types.Content(
+                    parts=[genai_types.Part(text=voice_system)]
+                ),
                 speech_config=genai_types.SpeechConfig(
                     voice_config=genai_types.VoiceConfig(
                         prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
@@ -309,10 +385,13 @@ class _OrchestratorSession:
                     import base64
                     # receive() yields until turn_complete; loop for continuous streaming
                     while self._voice_active:
+                        turn_text = ""
                         async for response in gemini.receive():
                             if not self._voice_active:
                                 return
                             audio_bytes: bytes | None = None
+                            text_part: str | None = None
+
                             # Direct .data attribute
                             if hasattr(response, "data") and isinstance(response.data, bytes):
                                 audio_bytes = response.data
@@ -323,11 +402,44 @@ class _OrchestratorSession:
                                         raw = part.inline_data.data
                                         audio_bytes = base64.b64decode(raw) if isinstance(raw, str) else raw
                                         break
+                                    if hasattr(part, "text") and part.text:
+                                        text_part = part.text
+
                             if audio_bytes:
                                 try:
                                     await self._ws.send_bytes(audio_bytes)
                                 except Exception:
                                     return
+
+                            if text_part:
+                                turn_text += text_part
+                                await _send(self._ws, {"type": "text_chunk", "text": text_part})
+
+                            # When a voice turn completes, parse ##ACTIONS## from text
+                            if (
+                                response.server_content
+                                and response.server_content.turn_complete
+                                and turn_text
+                            ):
+                                display_text = turn_text
+                                actions: list[Any] = []
+                                marker = "##ACTIONS##"
+                                idx = turn_text.rfind(marker)
+                                if idx != -1:
+                                    json_str = turn_text[idx + len(marker):].strip()
+                                    display_text = turn_text[:idx].rstrip()
+                                    try:
+                                        parsed = json.loads(json_str)
+                                        actions = parsed.get("actions", [])
+                                    except Exception:
+                                        pass
+                                if actions:
+                                    await _send(self._ws, {
+                                        "type": "turn_complete",
+                                        "full_text": display_text,
+                                        "actions": actions,
+                                    })
+                                turn_text = ""
 
                 await asyncio.gather(_forward_to_gemini(), _stream_from_gemini())
 
