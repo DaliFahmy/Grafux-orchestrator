@@ -282,7 +282,7 @@ class _OrchestratorSession:
             "has_canvas": bool(self._canvas_state),
             "has_active_blocks": bool(self._active_blocks),
             "response_modalities": ["AUDIO"],
-            "system_prompt_sent": False
+            "system_prompt_sent": True,
         }, "H-C")
         # endregion
 
@@ -314,44 +314,47 @@ class _OrchestratorSession:
 
             client = google_genai.Client(api_key=settings.gemini_api_key)
 
-            # Build voice system prompt — reuse chat_assistant so Gemini responds
-            # conversationally while appending ##ACTIONS## when needed
+            # Build voice system prompt — concise Grafux context for Gemini Live
             from app.prompts import get_system_prompt
-            raw_chat_prompt = get_system_prompt("chat_assistant")
             voice_context_parts: list[str] = []
             if self._canvas_state:
                 voice_context_parts.append(
-                    f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:3000]}"
+                    f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:2000]}"
                 )
             if self._active_blocks:
                 voice_context_parts.append(
-                    f"Active blocks:\n{json.dumps(self._active_blocks)[:500]}"
+                    f"Active blocks:\n{json.dumps(self._active_blocks)[:400]}"
                 )
             if self._saved_library:
                 lib_lines = [
                     f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
                     for e in self._saved_library
                 ]
-                voice_context_parts.append("Saved block library:\n" + "\n".join(lib_lines))
+                voice_context_parts.append("Saved block library:\n" + "\n".join(lib_lines[:20]))
             voice_context = (
                 "\n\n".join(voice_context_parts) if voice_context_parts else "No diagram loaded."
             )
-            voice_system = raw_chat_prompt.replace("{DIAGRAM_CONTEXT}", voice_context)
+            voice_system = (
+                "You are a voice assistant embedded in Grafux, a visual block-diagram pipeline tool. "
+                "Answer questions about the diagram conversationally. "
+                "Be concise — you are speaking, not writing.\n\n"
+                + voice_context
+            )
 
             # region agent log
-            _dlog("voice_start", {
+            _dlog("voice_relay_start", {
                 "has_canvas": bool(self._canvas_state),
                 "has_active_blocks": bool(self._active_blocks),
-                "response_modalities": ["AUDIO", "TEXT"],
+                "response_modalities": ["AUDIO"],
                 "system_prompt_sent": True,
                 "system_snippet": voice_system[:150],
             }, "H-C")
             # endregion
 
             live_config = genai_types.LiveConnectConfig(
-                response_modalities=["AUDIO", "TEXT"],
+                response_modalities=["AUDIO"],
                 system_instruction=genai_types.Content(
-                    parts=[genai_types.Part(text=voice_system)]
+                    parts=[genai_types.Part(text=voice_system)],
                 ),
                 speech_config=genai_types.SpeechConfig(
                     voice_config=genai_types.VoiceConfig(
@@ -364,6 +367,15 @@ class _OrchestratorSession:
 
             # Model name is configurable; default is the current GA Live model.
             live_model = settings.gemini_live_model
+
+            # region agent log
+            _dlog("gemini_connect_attempt", {
+                "model": live_model,
+                "has_system_instruction": True,
+                "system_len": len(voice_system),
+            }, "H-C")
+            # endregion
+
             async with client.aio.live.connect(
                 model=live_model,
                 config=live_config,
@@ -385,12 +397,10 @@ class _OrchestratorSession:
                     import base64
                     # receive() yields until turn_complete; loop for continuous streaming
                     while self._voice_active:
-                        turn_text = ""
                         async for response in gemini.receive():
                             if not self._voice_active:
                                 return
                             audio_bytes: bytes | None = None
-                            text_part: str | None = None
 
                             # Direct .data attribute
                             if hasattr(response, "data") and isinstance(response.data, bytes):
@@ -402,44 +412,12 @@ class _OrchestratorSession:
                                         raw = part.inline_data.data
                                         audio_bytes = base64.b64decode(raw) if isinstance(raw, str) else raw
                                         break
-                                    if hasattr(part, "text") and part.text:
-                                        text_part = part.text
 
                             if audio_bytes:
                                 try:
                                     await self._ws.send_bytes(audio_bytes)
                                 except Exception:
                                     return
-
-                            if text_part:
-                                turn_text += text_part
-                                await _send(self._ws, {"type": "text_chunk", "text": text_part})
-
-                            # When a voice turn completes, parse ##ACTIONS## from text
-                            if (
-                                response.server_content
-                                and response.server_content.turn_complete
-                                and turn_text
-                            ):
-                                display_text = turn_text
-                                actions: list[Any] = []
-                                marker = "##ACTIONS##"
-                                idx = turn_text.rfind(marker)
-                                if idx != -1:
-                                    json_str = turn_text[idx + len(marker):].strip()
-                                    display_text = turn_text[:idx].rstrip()
-                                    try:
-                                        parsed = json.loads(json_str)
-                                        actions = parsed.get("actions", [])
-                                    except Exception:
-                                        pass
-                                if actions:
-                                    await _send(self._ws, {
-                                        "type": "turn_complete",
-                                        "full_text": display_text,
-                                        "actions": actions,
-                                    })
-                                turn_text = ""
 
                 await asyncio.gather(_forward_to_gemini(), _stream_from_gemini())
 
