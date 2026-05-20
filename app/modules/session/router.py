@@ -5,6 +5,18 @@ import json
 import uuid
 from typing import Any
 
+# region agent log
+import time as _time, pathlib as _pathlib
+_DEBUG_LOG = _pathlib.Path("debug-859e2c.log")
+def _dlog(msg: str, data: dict, hyp: str) -> None:
+    entry = json.dumps({"sessionId":"859e2c","timestamp":int(_time.time()*1000),"location":"session/router.py","message":msg,"data":data,"hypothesisId":hyp})
+    try:
+        with _DEBUG_LOG.open("a", encoding="utf-8") as _f:
+            _f.write(entry + "\n")
+    except Exception:
+        pass
+# endregion
+
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core.logging import get_logger
@@ -163,11 +175,21 @@ class _OrchestratorSession:
         self._history.append({"role": "user", "content": text})
 
         from app.prompts import get_system_prompt
-        system_parts = [get_system_prompt("chat_assistant")]
+        raw_prompt = get_system_prompt("chat_assistant")
+        system_parts = [raw_prompt]
         if self._canvas_state:
             system_parts.append(f"Current canvas: {json.dumps(self._canvas_state)[:2000]}")
         if self._active_blocks:
             system_parts.append(f"Active blocks: {json.dumps(self._active_blocks)[:500]}")
+
+        # region agent log
+        _dlog("system_prompt_built", {
+            "has_canvas": bool(self._canvas_state),
+            "has_active_blocks": bool(self._active_blocks),
+            "diagram_context_placeholder_present": "{DIAGRAM_CONTEXT}" in raw_prompt,
+            "prompt_snippet": raw_prompt[:200]
+        }, "H-B")
+        # endregion
 
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": " ".join(system_parts)},
@@ -189,6 +211,14 @@ class _OrchestratorSession:
                     full_text += delta
                     await _send(self._ws, {"type": "text_chunk", "text": delta})
 
+            # region agent log
+            _dlog("full_text_before_parse", {
+                "has_actions_tag": "##ACTIONS##" in full_text,
+                "tail_200": full_text[-200:] if len(full_text) > 200 else full_text,
+                "length": len(full_text)
+            }, "H-A")
+            # endregion
+
             self._history.append({"role": "assistant", "content": full_text})
             await _send(self._ws, {"type": "turn_complete", "full_text": full_text, "actions": []})
 
@@ -208,6 +238,15 @@ class _OrchestratorSession:
 
         if self._voice_active:
             return
+
+        # region agent log
+        _dlog("voice_start", {
+            "has_canvas": bool(self._canvas_state),
+            "has_active_blocks": bool(self._active_blocks),
+            "response_modalities": ["AUDIO"],
+            "system_prompt_sent": False
+        }, "H-C")
+        # endregion
 
         self._voice_active = True
         await _send(self._ws, {"type": "voice_started"})
