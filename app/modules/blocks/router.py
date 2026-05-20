@@ -8,9 +8,26 @@ from fastapi import APIRouter
 from app.config import get_settings
 from app.core.logging import get_logger
 from app.dependencies import CurrentUser
-from app.modules.blocks.schemas import TopicGenerateRequest
+from app.modules.blocks.schemas import (
+    TopicGenerateRequest,
+    RunSearchRequest,
+    RunSelectionRequest,
+    RunFilterRequest,
+    RegenerateToolRequest,
+    RegenerateFilterRequest,
+)
+from app.prompts import get_system_prompt, get_json_schema
 
 log = get_logger("blocks.router")
+
+# Map block_type → Msg_config section name
+_BLOCK_TYPE_SECTION: dict[str, str] = {
+    "topics": "create_topic",
+    "components": "create_component",
+    "commands": "create_cmd",
+    "tools": "create_tool",
+    "procedures": "create_procedure",
+}
 
 router = APIRouter(prefix="/blocks", tags=["blocks"])
 
@@ -85,39 +102,12 @@ async def generate_topic_block(
     cat = body.category
 
     block_id_example = uuid.uuid4().hex[:8]
-    system_prompt = f"""\
-You are a Grafux block generator. Given a topic description, generate a structured \
-topic block as a JSON object in EXACTLY this format (no extra keys, no markdown):
-{{
-  "tool_calls": [
-    {{
-      "id": 1,
-      "jsonrpc": "2.0",
-      "method": "tools/call",
-      "params": {{
-        "name": "{name}",
-        "block_id": "{block_id_example}",
-        "block_type": "topics",
-        "x": 0,
-        "y": 0,
-        "input_ports": [
-          {{"port_name": "description", "port_content": "<the description text>", "port_path": "data/topics/{cat}/{name}/inputs/description.txt"}}
-        ],
-        "output_ports": [
-          {{"port_name": "<output_name>", "port_content": "<actual value>", "port_path": "data/topics/{cat}/{name}/outputs/<output_name>.txt"}}
-        ]
-      }}
-    }}
-  ],
-  "connections": []
-}}
-
-Rules:
-- Generate meaningful output_ports based on the description (extract real data values)
-- Use lowercase_with_underscores for all port names
-- Keep port_path prefix as data/topics/{cat}/{name}/ substituting actual port names
-- Output ONLY valid JSON — no markdown fences, no explanation\
-"""
+    section = _BLOCK_TYPE_SECTION.get("topics", "create_topic")
+    system_prompt = (
+        get_system_prompt(section)
+        + "\n\nJSON FORMAT REFERENCE:\n"
+        + get_json_schema()
+    )
 
     user_message = f"Topic name: {name}\nCategory: {cat}\n"
     if body.inputs:
@@ -157,3 +147,169 @@ Rules:
         log.error("blocks_generate_topic_error", topic=body.topic_name, error=str(exc))
         # Graceful fallback to simple template
         return _simple_topic_response(body)
+
+
+async def _call_openai_json(system_prompt: str, user_message: str, temperature: float = 0.3) -> dict:
+    """Shared helper: call OpenAI with response_format=json_object and return parsed dict."""
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise ValueError("OPENAI_API_KEY not configured")
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    response = await client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        response_format={"type": "json_object"},
+        temperature=temperature,
+    )
+    return json.loads(response.choices[0].message.content or "{}")
+
+
+@router.post("/run/search")
+async def run_search_block(
+    body: RunSearchRequest,
+    user: CurrentUser,
+) -> dict:
+    """Fill a search block's output ports with AI-generated content."""
+    settings = get_settings()
+
+    system_prompt = get_system_prompt("run_search")
+    if not system_prompt:
+        system_prompt = (
+            "You are an AI assistant. Given a block name, type, and context, "
+            "return a JSON object where each key is an output port name and the value "
+            "is detailed content for that port. Return ONLY valid JSON."
+        )
+
+    user_message = body.context_message
+    if body.existing_output_ports:
+        user_message += "\n\nOUTPUT PORTS TO FILL:\n"
+        for name in body.existing_output_ports:
+            user_message += f"- {name}\n"
+
+    try:
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.3)
+        log.info("blocks_run_search_ok", block=body.block_name, block_type=body.block_type)
+        return result
+    except Exception as exc:
+        log.error("blocks_run_search_error", block=body.block_name, error=str(exc))
+        raise
+
+
+@router.post("/run/selection")
+async def run_selection_block(
+    body: RunSelectionRequest,
+    user: CurrentUser,
+) -> dict:
+    """Use AI to select the best candidate matching the given criteria."""
+    candidate_names = [c.get("name", "") for c in body.candidates]
+    candidate_list = "\n".join(
+        f"- {c.get('name', '')}: {c.get('value', '')}" for c in body.candidates
+    )
+
+    system_prompt = (
+        "You are a selection assistant. Given a list of candidates and a selection criteria, "
+        "choose the single best matching candidate. "
+        "Return ONLY valid JSON with two keys: "
+        '"selected" (the exact name of the chosen candidate) and '
+        '"analysis" (a brief explanation of why it was selected).'
+    )
+    user_message = (
+        f"Block: {body.block_name}\n\n"
+        f"Selection criteria:\n{body.criteria}\n\n"
+        f"Candidates:\n{candidate_list}"
+    )
+
+    try:
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
+        log.info("blocks_run_selection_ok", block=body.block_name)
+        return result
+    except Exception as exc:
+        log.error("blocks_run_selection_error", block=body.block_name, error=str(exc))
+        raise
+
+
+@router.post("/run/filter")
+async def run_filter_block(
+    body: RunFilterRequest,
+    user: CurrentUser,
+) -> dict:
+    """Apply filter criteria to input data using AI (WASM path — no local Python)."""
+    system_prompt = (
+        "You are a data filtering assistant. Given input data and filter criteria, "
+        "apply the criteria and return a JSON object with these keys: "
+        '"filtered" (the filtered/transformed result), '
+        '"analysis" (brief explanation of what was done), '
+        '"errors" (any issues encountered, or empty string), '
+        '"warnings" (any warnings, or empty string), '
+        '"improvements" (suggestions for the filter code or criteria). '
+        "Return ONLY valid JSON."
+    )
+    code_section = f"\nFilter code (for reference):\n{body.code}" if body.code.strip() else ""
+    user_message = (
+        f"Block: {body.block_name}\n"
+        f"Filter type: {body.filter_type}\n"
+        f"Description: {body.description}\n"
+        f"Criteria: {body.criteria}\n"
+        f"Input data:\n{body.input_value[:4000]}"
+        f"{code_section}"
+    )
+
+    try:
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
+        log.info("blocks_run_filter_ok", block=body.block_name)
+        return result
+    except Exception as exc:
+        log.error("blocks_run_filter_error", block=body.block_name, error=str(exc))
+        raise
+
+
+@router.post("/regenerate/tool")
+async def regenerate_tool_block(
+    body: RegenerateToolRequest,
+    user: CurrentUser,
+) -> dict:
+    """Regenerate a tool block's code using AI."""
+    system_prompt = (
+        "You are an expert Python developer. Given a tool description and optional existing code, "
+        "generate or improve a complete Python tool script. "
+        "Return ONLY valid JSON with these keys: "
+        '"code" (the complete Python script), '
+        '"description" (what the tool does), '
+        '"change" (summary of what was generated or changed). '
+        "The code should read inputs from file paths passed as arguments and write outputs to file paths."
+    )
+
+    try:
+        result = await _call_openai_json(system_prompt, body.prompt, temperature=0.3)
+        log.info("blocks_regenerate_tool_ok", block=body.block_name)
+        return result
+    except Exception as exc:
+        log.error("blocks_regenerate_tool_error", block=body.block_name, error=str(exc))
+        raise
+
+
+@router.post("/regenerate/filter")
+async def regenerate_filter_block(
+    body: RegenerateFilterRequest,
+    user: CurrentUser,
+) -> dict:
+    """Regenerate a filter block's Python code using AI."""
+    system_prompt = (
+        "You are an expert Python developer. Generate a Python filter script based on the given description and criteria. "
+        "The script should read from input_path and criteria_path, filter/transform the data, and write results to output files. "
+        "Return ONLY valid JSON with one key: "
+        '"code" (the complete Python filter script). '
+        "The script must handle errors gracefully and write to the output files specified in config."
+    )
+
+    try:
+        result = await _call_openai_json(system_prompt, body.prompt, temperature=0.3)
+        log.info("blocks_regenerate_filter_ok", block=body.block_name)
+        return result
+    except Exception as exc:
+        log.error("blocks_regenerate_filter_error", block=body.block_name, error=str(exc))
+        raise

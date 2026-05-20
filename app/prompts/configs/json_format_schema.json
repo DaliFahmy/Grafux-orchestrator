@@ -1,0 +1,191 @@
+{
+  "_comment_file": "This is the universal JSON format for drawing blocks. Use this structure for ALL block types.",
+  "_comment_usage": "Adapt field values based on block type (topics, components, commands, procedures, tools, filter)",  
+  "tool_calls": [
+    {
+      "_comment_block": "Each object in tool_calls array represents one block in the diagram",
+      
+      "id": 1,
+      "_comment_id": "Unique number for this block (1, 2, 3, ...). Increment for each block.",
+      
+      "jsonrpc": "2.0",
+      "_comment_jsonrpc": "Always '2.0' - do not change",
+      
+      "method": "tools/call",
+      "_comment_method": "Always 'tools/call' - do not change",
+      
+      "params": {
+        "_comment_params": "Contains all configuration for this block",
+        
+        "name": "block_name",
+        "_comment_name": "Block name in snake_case (use underscores, NO spaces). Examples: 'arduino_uno', 'top_cities', 'git_clone', 'step_1_prepare'",
+        
+        "username": "dali",
+        "_comment_username": "The name of the user who created the block. Copy verbatim — do NOT modify.",
+        
+        "block_id": "1",
+        "_comment_block_id": "Unique string ID. Ranges by type: topics=100+, components=200+, commands=301+, procedures=401+, tools=501+, filter=801+",
+        
+        "block_type": "topics",
+        "_comment_block_type": "Use canonical block types: 'tools', 'topics', 'commands', 'components', 'procedures', 'devices', 'memory', 'selection', 'filter'. See _block_type_specifics for exact required ports and params for each type.",
+        
+        "description": "Short human-readable description of what this block does.",
+        "_comment_description": "One-line description for the block. Used in UI and tooltips.",
+        
+        "filter_type": "text",
+        "_comment_filter_type": "Only for block_type 'filter'. Must be one of: text, picture, video.",
+        
+        "folder_path": "data/username_or_library/project_name/block_type/category_name/block_name",
+        "_comment_folder_path": "Path to the block folder. Format: data/{user_or_library}/{project}/{block_type}/{category}/{block_name}. Always use the data/... form; the app resolves the absolute location automatically regardless of build or deployment layout.",
+        
+        "bear": "<diagram_name>",
+        "_comment_bear": "Optional. Relative path 'category/diagram_name' of the nested diagram saved in this block's bear workspace. Set automatically when user saves a diagram inside a bear window. Omit if no bear diagram exists.",
+
+        "tags": [],
+        "_comment_tags": "Optional. String array of lowercase snake_case category/search tags (e.g. ['travel', 'europe', 'top_cities']). Omit if no tags are needed.",
+        
+        "x": 0,
+        "_comment_x": "Horizontal position in pixels. Space blocks ~200-500 apart (0, 200, 400, 600, ...)",
+        
+        "y": 0,
+        "_comment_y": "Vertical position in pixels. Use 0 for linear flows, different values for branching",
+
+        "width": 400,
+        "_comment_width": "Block width in pixels. Default 400. Increase for blocks with many ports or long names.",
+
+        "height": 400,
+        "_comment_height": "Block height in pixels. Default 400. Increase for blocks with many ports.",
+        
+        "input_ports": [
+          {
+            "_comment_input": "Input ports receive data. Each port needs 3 fields.",
+            
+            "port_name": "input_parameter",
+            "_comment_port_name": "Descriptive name in snake_case. Examples: 'camera_feed', 'settings', 'sequence', 'dependencies'",
+            
+            "port_content": "empty",
+            "_comment_port_content": "For INPUT ports: use empty string '' unless there is initial content to provide",
+            
+            "port_path": "data/topics/category_name/block_name/inputs/input_parameter.txt",
+            "_comment_port_path": "MUST follow exact format: For topics/tools/commands/components/devices: 'data/{block_type}/{category}/{block_name}/inputs|outputs/{port_name}.txt' | For procedures: 'data/procedures/{procedureName}/{stepName}/inputs|outputs/{port_name}.txt' | For memory/selection/filter: 'data/{block_type}/{block_name}/inputs|outputs/{port_name}.txt'"
+          }
+        ],
+        
+        "output_ports": [
+          {
+            "_comment_output": "Output ports produce data. Each port needs 3 fields.",
+            
+            "port_name": "output_result",
+            "_comment_port_name": "Descriptive name in snake_case. Examples: 'results', 'description', 'Paris', 'prepared_materials'",
+            
+            "port_content": "Detailed description or content extracted from analysis",
+            "_comment_port_content": "For OUTPUT ports: provide detailed, useful content. This is the actual data produced.",
+            
+            "port_path": "data/topics/category_name/block_name/outputs/output_result.txt",
+            "_comment_port_path": "MUST follow exact format: For topics/tools/commands/components/devices: 'data/{block_type}/{category}/{block_name}/inputs|outputs/{port_name}.txt' | For procedures: 'data/procedures/{procedureName}/{stepName}/inputs|outputs/{port_name}.txt' | For memory/selection/filter: 'data/{block_type}/{block_name}/inputs|outputs/{port_name}.txt'"
+          }
+        ],
+        
+        "arguments": {},
+        "_comment_arguments": "Maps input port names to sources. Format: {'port_name': 'block_name/inputs/port_name'} OR {'port_name': {'fromBlockName': 'source', 'fromPort': 'port'}}"
+      }
+    },
+    
+    {
+      "_comment_block_2": "Example of a second block to show multiple blocks structure",
+      
+      "id": 2,
+      "jsonrpc": "2.0",
+      "method": "tools/call",
+      "params": {
+        "name": "another_block",
+        "username": "dali",
+        "block_id": "2",
+        "block_type": "topics",
+        "description": "Short description of this block.",
+        "folder_path": "data/username_or_library/project_name/topics/category_name/another_block",
+        "x": 400,
+        "_comment_x_spacing": "Space this block 400 pixels from the previous one",
+        "y": 0,
+        "width": 400,
+        "height": 400,
+        "input_ports": [
+          {
+            "port_name": "data_input",
+            "port_content": "",
+            "_comment_connection": "This port can receive data from the first block's output",
+            "port_path": "data/topics/category_name/another_block/inputs/data_input.txt"
+          }
+        ],
+        "output_ports": [
+          {
+            "port_name": "final_result",
+            "port_content": "Final processed output",
+            "port_path": "data/topics/category_name/another_block/outputs/final_result.txt"
+          }
+        ],
+        "arguments": {
+          "data_input": {
+            "fromBlockName": "block_name",
+            "fromPort": "output_result"
+          }
+        }
+      }
+    }
+  ],
+  
+  "connections": [
+    {
+      "_comment_connection": "Connections link output ports to input ports between blocks",
+      
+      "from_block_name": "block_name",
+      "_comment_from_block": "Name of the source block (must exist in tool_calls)",
+      
+      "from_port_name": "output_result",
+      "_comment_from_port": "Name of the output port from source block",
+      
+      "from_port_path": "data/topics/category_name/block_name/outputs/output_result.txt",
+      "_comment_from_path": "Full path to the source output port file",
+      
+      "to_block_name": "another_block",
+      "_comment_to_block": "Name of the destination block (must exist in tool_calls)",
+      
+      "to_port_name": "data_input",
+      "_comment_to_port": "Name of the input port on destination block",
+      
+      "to_port_path": "data/topics/category_name/another_block/inputs/data_input.txt",
+      "_comment_to_path": "Full path to the destination input port file"
+    }
+  ],
+  
+  "_CRITICAL_RULES": {
+    "_comment_rules": "These rules MUST be followed when generating JSON",
+    
+    "rule_1_structure": "ALWAYS include both 'tool_calls' array and 'connections' array at root level. Valid block_type values: topics, components, commands, procedures, tools, devices, memory, selection, filter.",
+    "rule_2_naming": "Block names and port names MUST use snake_case (underscores, NO spaces)",
+    "rule_3_ports": "Every port MUST have exactly 3 fields: port_name, port_content, port_path",
+    "rule_4_paths": "Port paths MUST follow format: For topics/tools/commands/components/devices: data/{block_type}/{category}/{block_name}/inputs|outputs/{port_name}.txt | For procedures: data/procedures/{procedureName}/{stepName}/inputs|outputs/{port_name}.txt | For memory/selection/filter: data/{block_type}/{block_name}/inputs|outputs/{port_name}.txt",
+    "rule_5_output": "Return ONLY valid JSON - no markdown (```), no explanations, no extra text",
+    "rule_6_closing": "ALL brackets [ ] and braces { } must be properly closed",
+    "rule_7_comments": "When generating responses, REMOVE all '_comment' fields",
+    "rule_8_content": "Input ports: empty ''. Output ports: detailed content",
+    "rule_9_description": "ALWAYS include params.description: one-line human-readable description of what the block does.",
+    "rule_10_folder_path": "ALWAYS include params.folder_path: path to block folder. Format data/{user_or_library}/{project}/{block_type}/{category}/{block_name}. Always use the data/... form; the app resolves the absolute location automatically.",
+    "rule_11_bear": "Include params.bear ONLY when a nested bear diagram exists for this block. Value format is 'category/diagram_name' relative to the block's diagrams/ sub-folder. Do NOT invent a value — this field is set automatically by the application.",
+    "rule_12_size": "ALWAYS include params.width and params.height (integers, default 400). Increase width/height to reflect block complexity — wider for blocks with many ports or long port names.",
+    "rule_13_username": "ALWAYS copy params.username exactly as given in the context. NEVER invent, change, or omit it.",
+    "rule_14_tags": "Optional params.tags: string array for categorization (e.g. ['travel', 'europe']). Omit the field entirely if irrelevant. Values must be lowercase snake_case.",
+
+    "_block_type_specifics": {
+      "topics": "block_id: 100+, path: topics/{category}/{name}. REQUIRED input ports: [description]. REQUIRED output ports: one per entity (port_name = entity name in snake_case, port_content = description of entity). Do NOT add a sibling key named 'topics' on the tool call object.",
+      "components": "block_id: 200+, path: components/{group}/{name}. REQUIRED input ports: description, connection, example_projects, integration. REQUIRED output ports (all 12): description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration.",
+      "commands": "block_id: 301+, path: commands/{package}/{name}. REQUIRED input ports: description, plus one port per command parameter. REQUIRED output ports: description, result.",
+      "procedures": "block_id: 401+, path: procedures/{procedureName}/{stepName} (NO category — has procedure and step levels). Step naming: step_{number}_{descriptive_name}. REQUIRED input ports: sequence, dependencies. REQUIRED output ports: sequence, description, difficulty, dependencies, requirement, duration. x spacing: 500px between steps.",
+      "tools": "block_id: 501+, path: tools/{category}/{name}. REQUIRED input ports: description (reserved, always first), any task-specific inputs, code (reserved, always last). REQUIRED output ports: always include ALL of results, errors, warnings, code, status, description, change, improvements — append them after any task-specific outputs. Never omit any of these 8 standard output ports.",
+      "devices": "block_id: 601+, path: devices/{category}/{name}. FIXED input ports (exactly these 5, no more, no less): description, device_id, command, text, file. FIXED output ports (exactly these 8, no more, no less): results, response, status, errors, terminal, file, warnings, improvements.",
+      "memory": "block_id: 701+, path: memory/{name}. REQUIRED param: memory_mode set to either 'snapshot' or 'sequential'. snapshot mode — REQUIRED input ports: description, input; output ports: [] (empty, populated dynamically at runtime). sequential mode — REQUIRED input ports: description plus at least one user-defined data port; REQUIRED output ports: output.",
+      "selection": "block_id: 751+, path: selection/{name}. REQUIRED input ports: description, criteria, plus at least one candidate input port representing items to choose from. REQUIRED output ports: selected, analysis.",
+      "filter": "block_id: 801+, path: filter/{name}. REQUIRED param: filter_type set to one of: text, picture, video. FIXED input ports (exactly these 4): description, code, criteria, input. FIXED output ports (exactly these 6): filtered, analysis, errors, warnings, improvements, code. The input 'code' port stores editable Python used by Run; the output 'code' port mirrors generated/regenerated/used code."
+    }
+  }
+}

@@ -324,10 +324,12 @@ class WorkflowEngine:
         """
         from app.modules.workflow.checkpoints import get_postgres_checkpointer
 
+        from app.prompts import get_system_prompt as _get_prompt
         initial_user_message = input_data.get("message") or input_data.get("prompt", "")
         messages: list[BaseMessage] = []
-        if system_prompt := input_data.get("system_prompt"):
-            messages.append(SystemMessage(content=system_prompt))
+        system_prompt_text = input_data.get("system_prompt") or _get_prompt("build_app")
+        if system_prompt_text:
+            messages.append(SystemMessage(content=system_prompt_text))
         if initial_user_message:
             messages.append(HumanMessage(content=initial_user_message))
 

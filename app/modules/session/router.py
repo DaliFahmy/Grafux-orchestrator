@@ -162,10 +162,8 @@ class _OrchestratorSession:
 
         self._history.append({"role": "user", "content": text})
 
-        system_parts = [
-            "You are Grafux, an AI assistant for a visual programming canvas. "
-            "Help users create, modify, and understand their canvas blocks and workflows."
-        ]
+        from app.prompts import get_system_prompt
+        system_parts = [get_system_prompt("chat_assistant")]
         if self._canvas_state:
             system_parts.append(f"Current canvas: {json.dumps(self._canvas_state)[:2000]}")
         if self._active_blocks:

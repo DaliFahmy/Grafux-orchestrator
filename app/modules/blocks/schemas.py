@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List
+from typing import Any, Dict, List
 
 from pydantic import BaseModel
 
@@ -11,3 +11,37 @@ class TopicGenerateRequest(BaseModel):
     inputs: List[str] = []
     outputs: List[str] = []
     description: str = ""
+
+
+class RunSearchRequest(BaseModel):
+    block_name: str
+    block_type: str  # "topics", "components", "procedures"
+    context_message: str
+    existing_output_ports: List[str] = []
+    recreate_ports: bool = False
+
+
+class RunSelectionRequest(BaseModel):
+    block_name: str
+    criteria: str
+    candidates: List[Dict[str, Any]] = []
+
+
+class RunFilterRequest(BaseModel):
+    block_name: str
+    filter_type: str = "text"
+    description: str = ""
+    code: str = ""
+    criteria: str = ""
+    input_value: str = ""
+
+
+class RegenerateToolRequest(BaseModel):
+    block_name: str
+    prompt: str
+
+
+class RegenerateFilterRequest(BaseModel):
+    block_name: str
+    filter_type: str = "text"
+    prompt: str
