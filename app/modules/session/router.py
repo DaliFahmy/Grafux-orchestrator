@@ -314,48 +314,18 @@ class _OrchestratorSession:
 
             client = google_genai.Client(api_key=settings.gemini_api_key)
 
-            # Build voice system prompt — concise Grafux context for Gemini Live
-            from app.prompts import get_system_prompt
-            voice_context_parts: list[str] = []
-            if self._canvas_state:
-                voice_context_parts.append(
-                    f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:2000]}"
-                )
-            if self._active_blocks:
-                voice_context_parts.append(
-                    f"Active blocks:\n{json.dumps(self._active_blocks)[:400]}"
-                )
-            if self._saved_library:
-                lib_lines = [
-                    f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
-                    for e in self._saved_library
-                ]
-                voice_context_parts.append("Saved block library:\n" + "\n".join(lib_lines[:20]))
-            voice_context = (
-                "\n\n".join(voice_context_parts) if voice_context_parts else "No diagram loaded."
-            )
-            voice_system = (
-                "You are a voice assistant embedded in Grafux, a visual block-diagram pipeline tool. "
-                "Answer questions about the diagram conversationally. "
-                "Be concise — you are speaking, not writing.\n\n"
-                + voice_context
-            )
-
             # region agent log
             _dlog("voice_relay_start", {
                 "has_canvas": bool(self._canvas_state),
-                "has_active_blocks": bool(self._active_blocks),
-                "response_modalities": ["AUDIO"],
-                "system_prompt_sent": True,
-                "system_snippet": voice_system[:150],
+                "has_context": bool(self._canvas_state or self._saved_library),
             }, "H-C")
             # endregion
 
+            # Exact original config that worked before — do not add system_instruction
+            # (gemini-3.1-flash-live-preview rejects LiveConnectConfig.system_instruction
+            # with error 1011)
             live_config = genai_types.LiveConnectConfig(
                 response_modalities=["AUDIO"],
-                system_instruction=genai_types.Content(
-                    parts=[genai_types.Part(text=voice_system)],
-                ),
                 speech_config=genai_types.SpeechConfig(
                     voice_config=genai_types.VoiceConfig(
                         prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
@@ -365,17 +335,7 @@ class _OrchestratorSession:
                 ),
             )
 
-            # Model name is configurable; default is the current GA Live model.
             live_model = settings.gemini_live_model
-
-            # region agent log
-            _dlog("gemini_connect_attempt", {
-                "model": live_model,
-                "has_system_instruction": True,
-                "system_len": len(voice_system),
-            }, "H-C")
-            # endregion
-
             async with client.aio.live.connect(
                 model=live_model,
                 config=live_config,
@@ -395,17 +355,14 @@ class _OrchestratorSession:
 
                 async def _stream_from_gemini() -> None:
                     import base64
-                    # receive() yields until turn_complete; loop for continuous streaming
                     while self._voice_active:
                         async for response in gemini.receive():
                             if not self._voice_active:
                                 return
                             audio_bytes: bytes | None = None
 
-                            # Direct .data attribute
                             if hasattr(response, "data") and isinstance(response.data, bytes):
                                 audio_bytes = response.data
-                            # Parts inside server_content.model_turn
                             elif response.server_content and response.server_content.model_turn:
                                 for part in response.server_content.model_turn.parts:
                                     if hasattr(part, "inline_data") and part.inline_data:
