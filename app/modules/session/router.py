@@ -314,32 +314,81 @@ class _OrchestratorSession:
 
             client = google_genai.Client(api_key=settings.gemini_api_key)
 
+            # Build Grafux context message for context seeding
+            diagram_ctx_parts: list[str] = []
+            if self._canvas_state:
+                diagram_ctx_parts.append(
+                    f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:2500]}"
+                )
+            if self._active_blocks:
+                diagram_ctx_parts.append(
+                    f"Active blocks:\n{json.dumps(self._active_blocks)[:400]}"
+                )
+            if self._saved_library:
+                lib_lines = [
+                    f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
+                    for e in self._saved_library
+                ]
+                diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines[:30]))
+            diagram_context = "\n\n".join(diagram_ctx_parts) if diagram_ctx_parts else "No diagram loaded."
+
+            grafux_instructions = (
+                "You are a voice assistant embedded in Grafux, a visual block-diagram pipeline tool. "
+                "Respond conversationally and concisely — you are speaking, not writing.\n\n"
+                "You have FULL CONTROL over the canvas. When the user asks you to perform an action, "
+                'speak your response naturally AND append a machine tag at the very end of your spoken text:\n'
+                '##ACTIONS##{"actions":[...]}\n\n'
+                "Action vocabulary:\n"
+                '  run_block:        {"type":"run_block","target_block":"Name"}\n'
+                '  regenerate_block: {"type":"regenerate_block","target_block":"Name"}\n'
+                '  add_port:         {"type":"add_port","target_block":"Name","direction":"input","port_name":"name"}\n'
+                '  remove_port:      {"type":"remove_port","target_block":"Name","direction":"output","port_name":"name"}\n'
+                '  set_port_value:   {"type":"set_port_value","target_block":"Name","direction":"input","port_name":"name","value":"val"}\n'
+                '  connect_ports:    {"type":"connect_ports","from_block":"A","from_port":"out","to_block":"B","to_port":"in"}\n'
+                '  delete_block:     {"type":"delete_block","target_block":"Name"} (ask for confirmation first)\n'
+                '  load_block:       {"type":"load_block","block_type":"topics","block_name":"cities5"} (confirm first)\n'
+                '  create_block:     {"type":"create_block","block_type":"tools","block_name":"name","description":"desc","inputs":[],"outputs":[]}\n\n'
+                "If you are only answering a question, omit ##ACTIONS## entirely.\n\n"
+                f"{diagram_context}"
+            )
+
             # region agent log
             _dlog("voice_relay_start", {
                 "has_canvas": bool(self._canvas_state),
-                "has_context": bool(self._canvas_state or self._saved_library),
+                "has_saved_library": bool(self._saved_library),
+                "context_len": len(grafux_instructions),
             }, "H-C")
             # endregion
 
-            # Exact original config that worked before — do not add system_instruction
-            # (gemini-3.1-flash-live-preview rejects LiveConnectConfig.system_instruction
-            # with error 1011)
-            live_config = genai_types.LiveConnectConfig(
-                response_modalities=["AUDIO"],
-                speech_config=genai_types.SpeechConfig(
-                    voice_config=genai_types.VoiceConfig(
-                        prebuilt_voice_config=genai_types.PrebuiltVoiceConfig(
-                            voice_name="Aoede"
-                        )
-                    )
-                ),
-            )
+            # Plain dict config — avoids SDK version type issues.
+            # history_config enables send_client_content for seeding initial context.
+            # output_audio_transcription lets us capture text from audio responses.
+            live_config: dict = {
+                "response_modalities": ["AUDIO"],
+                "output_audio_transcription": {},
+                "history_config": {"initial_history_in_client_content": True},
+                "speech_config": {
+                    "voice_config": {
+                        "prebuilt_voice_config": {"voice_name": "Aoede"}
+                    }
+                },
+            }
 
             live_model = settings.gemini_live_model
             async with client.aio.live.connect(
                 model=live_model,
                 config=live_config,
             ) as gemini:
+
+                # Seed Grafux context as initial history before mic audio arrives.
+                # turn_complete=False so Gemini does not speak a response to this.
+                await gemini.send_client_content(
+                    turns=[
+                        {"role": "user", "parts": [{"text": grafux_instructions}]},
+                        {"role": "model", "parts": [{"text": "Understood. I have the Grafux diagram context and I'm ready to assist via voice."}]},
+                    ],
+                    turn_complete=False,
+                )
 
                 async def _forward_to_gemini() -> None:
                     while True:
@@ -356,11 +405,13 @@ class _OrchestratorSession:
                 async def _stream_from_gemini() -> None:
                     import base64
                     while self._voice_active:
+                        turn_transcript = ""
                         async for response in gemini.receive():
                             if not self._voice_active:
                                 return
-                            audio_bytes: bytes | None = None
 
+                            # Audio bytes — forward directly for playback
+                            audio_bytes: bytes | None = None
                             if hasattr(response, "data") and isinstance(response.data, bytes):
                                 audio_bytes = response.data
                             elif response.server_content and response.server_content.model_turn:
@@ -375,6 +426,42 @@ class _OrchestratorSession:
                                     await self._ws.send_bytes(audio_bytes)
                                 except Exception:
                                     return
+
+                            # Accumulate transcript of audio output
+                            if (
+                                response.server_content
+                                and hasattr(response.server_content, "output_transcription")
+                                and response.server_content.output_transcription
+                                and response.server_content.output_transcription.text
+                            ):
+                                frag = response.server_content.output_transcription.text
+                                turn_transcript += frag
+                                await _send(self._ws, {"type": "text_chunk", "text": frag})
+
+                            # When turn completes, parse ##ACTIONS## from transcript
+                            if (
+                                response.server_content
+                                and response.server_content.turn_complete
+                                and turn_transcript
+                            ):
+                                display_text = turn_transcript
+                                actions: list[Any] = []
+                                marker = "##ACTIONS##"
+                                idx = turn_transcript.rfind(marker)
+                                if idx != -1:
+                                    json_str = turn_transcript[idx + len(marker):].strip()
+                                    display_text = turn_transcript[:idx].rstrip()
+                                    try:
+                                        parsed = json.loads(json_str)
+                                        actions = parsed.get("actions", [])
+                                    except Exception:
+                                        pass
+                                await _send(self._ws, {
+                                    "type": "turn_complete",
+                                    "full_text": display_text,
+                                    "actions": actions,
+                                })
+                                turn_transcript = ""
 
                 await asyncio.gather(_forward_to_gemini(), _stream_from_gemini())
 
