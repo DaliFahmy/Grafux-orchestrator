@@ -5,18 +5,6 @@ import json
 import uuid
 from typing import Any
 
-# region agent log
-import time as _time, pathlib as _pathlib
-_DEBUG_LOG = _pathlib.Path("debug-859e2c.log")
-def _dlog(msg: str, data: dict, hyp: str) -> None:
-    entry = json.dumps({"sessionId":"859e2c","timestamp":int(_time.time()*1000),"location":"session/router.py","message":msg,"data":data,"hypothesisId":hyp})
-    try:
-        with _DEBUG_LOG.open("a", encoding="utf-8") as _f:
-            _f.write(entry + "\n")
-    except Exception:
-        pass
-# endregion
-
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core.logging import get_logger
@@ -205,16 +193,6 @@ class _OrchestratorSession:
         if self._active_blocks:
             system_parts.append(f"Active blocks: {json.dumps(self._active_blocks)[:500]}")
 
-        # region agent log
-        _dlog("system_prompt_built", {
-            "has_canvas": bool(self._canvas_state),
-            "has_saved_library": bool(self._saved_library),
-            "has_active_blocks": bool(self._active_blocks),
-            "diagram_context_placeholder_present": "{DIAGRAM_CONTEXT}" in raw_prompt,
-            "diagram_context_snippet": diagram_context[:200],
-        }, "H-B")
-        # endregion
-
         messages: list[dict[str, Any]] = [
             {"role": "system", "content": "\n\n".join(system_parts)},
             *self._history,
@@ -234,14 +212,6 @@ class _OrchestratorSession:
                 if delta:
                     full_text += delta
                     await _send(self._ws, {"type": "text_chunk", "text": delta})
-
-            # region agent log
-            _dlog("full_text_before_parse", {
-                "has_actions_tag": "##ACTIONS##" in full_text,
-                "tail_200": full_text[-200:] if len(full_text) > 200 else full_text,
-                "length": len(full_text),
-            }, "H-A")
-            # endregion
 
             # Parse ##ACTIONS## tag from the end of the model response
             display_text = full_text
@@ -276,15 +246,6 @@ class _OrchestratorSession:
 
         if self._voice_active:
             return
-
-        # region agent log
-        _dlog("voice_start", {
-            "has_canvas": bool(self._canvas_state),
-            "has_active_blocks": bool(self._active_blocks),
-            "response_modalities": ["AUDIO"],
-            "system_prompt_sent": True,
-        }, "H-C")
-        # endregion
 
         self._voice_active = True
         await _send(self._ws, {"type": "voice_started"})
@@ -351,14 +312,6 @@ class _OrchestratorSession:
                 "If you are only answering a question, omit ##ACTIONS## entirely.\n\n"
                 f"{diagram_context}"
             )
-
-            # region agent log
-            _dlog("voice_relay_start", {
-                "has_canvas": bool(self._canvas_state),
-                "has_saved_library": bool(self._saved_library),
-                "context_len": len(grafux_instructions),
-            }, "H-C")
-            # endregion
 
             # Plain dict config — avoids SDK version type issues.
             # history_config enables send_client_content for seeding initial context.
