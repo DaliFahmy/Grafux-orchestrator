@@ -173,10 +173,14 @@ async def run_search_block(
     body: RunSearchRequest,
     user: CurrentUser,
 ) -> dict:
-    """Fill a search block's output ports with AI-generated content."""
+    """Fill (or, when recreate_ports is set, redesign) a search block's output ports."""
     settings = get_settings()
 
-    system_prompt = get_system_prompt("run_search")
+    # Regenerate uses a prompt that lets the model redesign the port set; a regular
+    # Run uses the fill prompt that keeps the existing ports and only refreshes content.
+    system_prompt = (
+        get_system_prompt("regenerate_search") if body.recreate_ports else None
+    ) or get_system_prompt("run_search")
     if not system_prompt:
         system_prompt = (
             "You are an AI assistant. Given a block name, type, and context, "
@@ -185,7 +189,18 @@ async def run_search_block(
         )
 
     user_message = body.context_message
-    if body.existing_output_ports:
+    if body.recreate_ports:
+        # Regenerate: existing ports are context the model MAY change, not ports to fill.
+        if body.existing_output_ports:
+            user_message += "\n\nCURRENT OUTPUT PORTS (you may keep, rename, remove, or add new ones):\n"
+            for name in body.existing_output_ports:
+                user_message += f"- {name}\n"
+        user_message += (
+            "\nDesign the most useful set of output ports for this block from the "
+            "context above. Return a flat JSON object whose keys are the output port "
+            "names you choose and whose values are the detailed content for each port.\n"
+        )
+    elif body.existing_output_ports:
         user_message += "\n\nOUTPUT PORTS TO FILL:\n"
         for name in body.existing_output_ports:
             user_message += f"- {name}\n"

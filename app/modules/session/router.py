@@ -15,6 +15,39 @@ log = get_logger("session.router")
 router = APIRouter()
 
 
+def _format_library_entry(entry: dict[str, Any]) -> str:
+    """Format one saved-library entry for DIAGRAM_CONTEXT."""
+    block_type = entry.get("block_type", "")
+    block_name = entry.get("block_name", "")
+    category = entry.get("category", "")
+    if category:
+        return (
+            f'  block_type="{block_type}" category="{category}" block_name="{block_name}"'
+        )
+    return f'  block_type="{block_type}" block_name="{block_name}"'
+
+
+def _parse_actions_tag(full_text: str, session_id: str) -> tuple[str, list[Any]]:
+    """Extract ##ACTIONS## JSON from model text; log parse failures."""
+    marker = "##ACTIONS##"
+    idx = full_text.rfind(marker)
+    if idx == -1:
+        return full_text, []
+    json_str = full_text[idx + len(marker):].strip()
+    display_text = full_text[:idx].rstrip()
+    try:
+        parsed = json.loads(json_str)
+        return display_text, parsed.get("actions", [])
+    except Exception as exc:
+        log.warning(
+            "actions_parse_failed",
+            session_id=session_id,
+            error=str(exc),
+            snippet=json_str[:200],
+        )
+        return display_text, []
+
+
 async def _send(websocket: WebSocket, data: dict[str, Any]) -> None:
     try:
         await websocket.send_text(json.dumps(data))
@@ -177,10 +210,7 @@ class _OrchestratorSession:
                 f"Current canvas blocks:\n{json.dumps(self._canvas_state)[:3000]}"
             )
         if self._saved_library:
-            lib_lines = [
-                f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
-                for e in self._saved_library
-            ]
+            lib_lines = [_format_library_entry(e) for e in self._saved_library]
             diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines))
         diagram_context = (
             "\n\n".join(diagram_ctx_parts)
@@ -213,19 +243,7 @@ class _OrchestratorSession:
                     full_text += delta
                     await _send(self._ws, {"type": "text_chunk", "text": delta})
 
-            # Parse ##ACTIONS## tag from the end of the model response
-            display_text = full_text
-            actions: list[Any] = []
-            marker = "##ACTIONS##"
-            idx = full_text.rfind(marker)
-            if idx != -1:
-                json_str = full_text[idx + len(marker):].strip()
-                display_text = full_text[:idx].rstrip()
-                try:
-                    parsed = json.loads(json_str)
-                    actions = parsed.get("actions", [])
-                except Exception:
-                    pass
+            display_text, actions = _parse_actions_tag(full_text, self._session_id)
 
             self._history.append({"role": "assistant", "content": display_text})
             await _send(self._ws, {"type": "turn_complete", "full_text": display_text, "actions": actions})
@@ -286,36 +304,26 @@ class _OrchestratorSession:
                     f"Active blocks:\n{json.dumps(self._active_blocks)[:400]}"
                 )
             if self._saved_library:
-                lib_lines = [
-                    f'  block_type="{e.get("block_type","")}" block_name="{e.get("block_name","")}"'
-                    for e in self._saved_library
-                ]
-                diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines[:30]))
+                lib_lines = [_format_library_entry(e) for e in self._saved_library[:30]]
+                diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines))
             diagram_context = "\n\n".join(diagram_ctx_parts) if diagram_ctx_parts else "No diagram loaded."
+
+            from app.modules.session.canvas_tools import get_live_tools_config
 
             grafux_instructions = (
                 "You are a voice assistant embedded in Grafux, a visual block-diagram pipeline tool. "
                 "Respond conversationally and concisely — you are speaking, not writing.\n\n"
-                "You have FULL CONTROL over the canvas. When the user asks you to perform an action, "
-                'speak your response naturally AND append a machine tag at the very end of your spoken text:\n'
-                '##ACTIONS##{"actions":[...]}\n\n'
-                "Action vocabulary:\n"
-                '  run_block:        {"type":"run_block","target_block":"Name"}\n'
-                '  regenerate_block: {"type":"regenerate_block","target_block":"Name"}\n'
-                '  add_port:         {"type":"add_port","target_block":"Name","direction":"input","port_name":"name"}\n'
-                '  remove_port:      {"type":"remove_port","target_block":"Name","direction":"output","port_name":"name"}\n'
-                '  set_port_value:   {"type":"set_port_value","target_block":"Name","direction":"input","port_name":"name","value":"val"}\n'
-                '  connect_ports:    {"type":"connect_ports","from_block":"A","from_port":"out","to_block":"B","to_port":"in"}\n'
-                '  delete_block:     {"type":"delete_block","target_block":"Name"} (ask for confirmation first)\n'
-                '  load_block:       {"type":"load_block","block_type":"topics","block_name":"cities5"} (confirm first)\n'
-                '  create_block:     {"type":"create_block","block_type":"tools","block_name":"name","description":"desc","inputs":[],"outputs":[]}\n\n'
-                "If you are only answering a question, omit ##ACTIONS## entirely.\n\n"
+                "You have FULL CONTROL over the canvas via the provided tools. "
+                "When the user asks you to change the diagram (set a port value, run a block, connect ports, etc.), "
+                "call the matching tool function. Speak a brief confirmation; do NOT read JSON aloud.\n\n"
+                "Use exact block and port names from the canvas/active-block context. "
+                "For category-based saved blocks, block_name is the leaf block (e.g. add1), "
+                "not the category folder (e.g. general).\n"
+                "Ask for confirmation before load_block, create_block, or delete_block.\n"
+                "Execute set_port_value, run_block, add_port, connect_ports immediately when asked.\n\n"
                 f"{diagram_context}"
             )
 
-            # Plain dict config — avoids SDK version type issues.
-            # history_config enables send_client_content for seeding initial context.
-            # output_audio_transcription lets us capture text from audio responses.
             live_config: dict = {
                 "response_modalities": ["AUDIO"],
                 "output_audio_transcription": {},
@@ -325,6 +333,7 @@ class _OrchestratorSession:
                         "prebuilt_voice_config": {"voice_name": "Aoede"}
                     }
                 },
+                "tools": get_live_tools_config(),
             }
 
             live_model = settings.gemini_live_model
@@ -357,11 +366,43 @@ class _OrchestratorSession:
 
                 async def _stream_from_gemini() -> None:
                     import base64
+
+                    from app.modules.session.canvas_tools import (
+                        build_tool_function_responses,
+                        tool_calls_to_actions,
+                    )
+
                     while self._voice_active:
                         turn_transcript = ""
+                        turn_tool_actions: list[Any] = []
                         async for response in gemini.receive():
                             if not self._voice_active:
                                 return
+
+                            # Tool calls — structured canvas actions (primary voice path)
+                            tool_call = getattr(response, "tool_call", None)
+                            if tool_call is None and response.server_content:
+                                tool_call = getattr(response.server_content, "tool_call", None)
+                            if tool_call:
+                                function_calls = getattr(tool_call, "function_calls", None) or []
+                                if function_calls:
+                                    mapped = tool_calls_to_actions(
+                                        function_calls,
+                                        self._active_blocks,
+                                    )
+                                    turn_tool_actions.extend(mapped)
+                                    try:
+                                        await gemini.send_tool_response(
+                                            function_responses=build_tool_function_responses(
+                                                function_calls
+                                            )
+                                        )
+                                    except Exception as exc:
+                                        log.warning(
+                                            "voice_tool_response_failed",
+                                            session_id=self._session_id,
+                                            error=str(exc),
+                                        )
 
                             # Audio bytes — forward directly for playback
                             audio_bytes: bytes | None = None
@@ -391,30 +432,25 @@ class _OrchestratorSession:
                                 turn_transcript += frag
                                 await _send(self._ws, {"type": "text_chunk", "text": frag})
 
-                            # When turn completes, parse ##ACTIONS## from transcript
                             if (
                                 response.server_content
                                 and response.server_content.turn_complete
-                                and turn_transcript
                             ):
+                                actions: list[Any] = list(turn_tool_actions)
                                 display_text = turn_transcript
-                                actions: list[Any] = []
-                                marker = "##ACTIONS##"
-                                idx = turn_transcript.rfind(marker)
-                                if idx != -1:
-                                    json_str = turn_transcript[idx + len(marker):].strip()
-                                    display_text = turn_transcript[:idx].rstrip()
-                                    try:
-                                        parsed = json.loads(json_str)
-                                        actions = parsed.get("actions", [])
-                                    except Exception:
-                                        pass
-                                await _send(self._ws, {
-                                    "type": "turn_complete",
-                                    "full_text": display_text,
-                                    "actions": actions,
-                                })
+                                if not actions and turn_transcript:
+                                    display_text, actions = _parse_actions_tag(
+                                        turn_transcript,
+                                        self._session_id,
+                                    )
+                                if display_text or actions:
+                                    await _send(self._ws, {
+                                        "type": "turn_complete",
+                                        "full_text": display_text,
+                                        "actions": actions,
+                                    })
                                 turn_transcript = ""
+                                turn_tool_actions = []
 
                 await asyncio.gather(_forward_to_gemini(), _stream_from_gemini())
 
