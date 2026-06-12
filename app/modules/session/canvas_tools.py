@@ -41,6 +41,19 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
         required=["direction", "port_name", "value"],
     ),
     _func(
+        "read_port_value",
+        "Read the FULL current content of a block's input or output port file. "
+        "Use when the user asks what a port or block contains, to summarize or explain "
+        "port data, or when the canvas context marks a value as truncated. This returns "
+        "the content to you — it is not a canvas edit.",
+        {
+            "target_block": _str_prop("Block name on the canvas. Omit when one active block is in context."),
+            "direction": _str_prop("Must be 'input' or 'output'."),
+            "port_name": _str_prop("Port name (snake_case)."),
+        },
+        required=["direction", "port_name"],
+    ),
+    _func(
         "run_block",
         "Execute / run a block on the canvas.",
         {"target_block": _str_prop("Block name on the canvas.")},
