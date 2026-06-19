@@ -473,6 +473,7 @@ class _OrchestratorSession:
                     })
 
             display_text, actions = _parse_actions_tag(full_text, self._session_id)
+            await self._enrich_tool_actions(actions)
 
             self._history.append({"role": "assistant", "content": display_text})
             await _send(self._ws, {"type": "turn_complete", "full_text": display_text, "actions": actions})
@@ -480,6 +481,58 @@ class _OrchestratorSession:
         except Exception as exc:
             log.error("ai_turn_error", session_id=self._session_id, error=str(exc))
             await _send(self._ws, {"type": "error", "message": str(exc)})
+
+    async def _enrich_tool_actions(self, actions: list[Any]) -> None:
+        """Attach @register_tool-formatted Python to newly created tool blocks.
+
+        The client can run a tool the instant it is created only if the create_block
+        action carries correctly-formatted code — the same structural contract the manual
+        UnifiedWindow path produces. We generate it here (via the shared [create_tool]
+        prompt) so voice/text tools are no longer created empty.
+
+        Best-effort: any failure leaves `code` unset so the client's Regenerate (which now
+        uses the same prompt) can still fill it in.
+        """
+        if not actions:
+            return
+        from app.modules.blocks.router import (
+            build_tool_codegen_message,
+            generate_tool_code,
+        )
+        for action in actions:
+            if not isinstance(action, dict):
+                continue
+            if action.get("type") != "create_block":
+                continue
+            if str(action.get("block_type", "")).strip().lower() != "tools":
+                continue
+            if str(action.get("code", "")).strip():
+                continue  # model already supplied code inline
+            name = str(action.get("block_name", "")).strip()
+            description = str(action.get("description", "")).strip()
+            if not name or not description:
+                continue
+            try:
+                action["code"] = await generate_tool_code(
+                    build_tool_codegen_message(
+                        tool_name=name,
+                        description=description,
+                        inputs=action.get("inputs") or [],
+                        outputs=action.get("outputs") or [],
+                    )
+                )
+                log.info(
+                    "create_block_codegen_ok",
+                    session_id=self._session_id,
+                    block=name,
+                )
+            except Exception as exc:
+                log.warning(
+                    "create_block_codegen_failed",
+                    session_id=self._session_id,
+                    block=name,
+                    error=str(exc),
+                )
 
     async def _resolve_read_tool(self, args: dict[str, Any]) -> str:
         """Resolve a read_port_value tool call into a text result for the model."""
@@ -724,6 +777,7 @@ class _OrchestratorSession:
                                         turn_transcript,
                                         self._session_id,
                                     )
+                                await self._enrich_tool_actions(actions)
                                 if display_text or actions:
                                     await _send(self._ws, {
                                         "type": "turn_complete",

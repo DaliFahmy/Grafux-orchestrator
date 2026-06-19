@@ -168,6 +168,79 @@ async def _call_openai_json(system_prompt: str, user_message: str, temperature: 
     return json.loads(response.choices[0].message.content or "{}")
 
 
+async def _call_openai_text(system_prompt: str, user_message: str, temperature: float = 0.2) -> str:
+    """Shared helper: call OpenAI for raw text (no JSON mode) and return the message text."""
+    settings = get_settings()
+    if not settings.openai_api_key:
+        raise ValueError("OPENAI_API_KEY not configured")
+    from openai import AsyncOpenAI
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    response = await client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        temperature=temperature,
+    )
+    return response.choices[0].message.content or ""
+
+
+def _strip_code_fences(text: str) -> str:
+    """Drop a leading/trailing markdown ``` fence if the model added one despite instructions."""
+    t = text.strip()
+    if t.startswith("```"):
+        nl = t.find("\n")
+        if nl != -1:
+            t = t[nl + 1:]          # drop the opening ``` / ```python line
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]     # drop the closing fence
+    return t.strip()
+
+
+def build_tool_codegen_message(
+    *,
+    tool_name: str,
+    description: str,
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    existing_code: str = "",
+) -> str:
+    """Assemble the user message the [create_tool] prompt expects.
+
+    Supplies the tool name, input/output port names, and the requirement text so the
+    generated file's @register_tool decorator and I/O scaffold reference the real ports.
+    """
+    inputs = [p for p in (inputs or []) if p]
+    outputs = [p for p in (outputs or []) if p]
+    parts = [
+        f"Tool name: {tool_name}",
+        f"Input ports: {', '.join(inputs) if inputs else '(none)'}",
+        f"Output ports: {', '.join(outputs) if outputs else '(none)'}",
+        f"Tool Requirement:\n{description.strip()}",
+    ]
+    if existing_code.strip():
+        parts.append(
+            "Existing code (improve it; keep behaviour unless the requirement changed):\n"
+            f"{existing_code.strip()}"
+        )
+    return "\n\n".join(parts)
+
+
+async def generate_tool_code(user_message: str, *, temperature: float = 0.2) -> str:
+    """Generate a complete @register_tool-formatted Python file from a tool requirement.
+
+    Uses the shared [create_tool] Msg_config section — the same structural contract the
+    manual UnifiedWindow path produces — so voice/text tools fit the MCP server. Returns
+    raw Python source (markdown fences stripped).
+    """
+    system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["tools"])
+    if not system_prompt:
+        raise ValueError("create_tool prompt section missing from Msg_config")
+    raw = await _call_openai_text(system_prompt, user_message, temperature=temperature)
+    return _strip_code_fences(raw)
+
+
 @router.post("/run/search")
 async def run_search_block(
     body: RunSearchRequest,
@@ -287,21 +360,23 @@ async def regenerate_tool_block(
     body: RegenerateToolRequest,
     user: CurrentUser,
 ) -> dict:
-    """Regenerate a tool block's code using AI."""
-    system_prompt = (
-        "You are an expert Python developer. Given a tool description and optional existing code, "
-        "generate or improve a complete Python tool script. "
-        "Return ONLY valid JSON with these keys: "
-        '"code" (the complete Python script), '
-        '"description" (what the tool does), '
-        '"change" (summary of what was generated or changed). '
-        "The code should read inputs from file paths passed as arguments and write outputs to file paths."
-    )
+    """Regenerate a tool block's code in the MCP @register_tool format.
 
+    Uses the shared [create_tool] prompt so the regenerated file matches what the manual
+    UnifiedWindow path produces (decorator + file-based input/output scaffold). The app
+    assembles `body.prompt` with the tool name, input port names, description, and current
+    code, which is exactly the requirement text the prompt expects.
+    """
     try:
-        result = await _call_openai_json(system_prompt, body.prompt, temperature=0.3)
+        code = await generate_tool_code(body.prompt, temperature=0.2)
         log.info("blocks_regenerate_tool_ok", block=body.block_name)
-        return result
+        # Leave description empty so the app keeps the user's existing description port;
+        # only the code + change summary are authoritative here.
+        return {
+            "code": code,
+            "description": "",
+            "change": "Regenerated tool code in MCP @register_tool format.",
+        }
     except Exception as exc:
         log.error("blocks_regenerate_tool_error", block=body.block_name, error=str(exc))
         raise
