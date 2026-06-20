@@ -690,9 +690,16 @@ class _OrchestratorSession:
                         tool_calls_to_actions,
                     )
 
+                    # NOTE: `turn_tool_actions` is declared OUTSIDE the while loop on
+                    # purpose. `gemini.receive()` ends at the end of each turn (hence the
+                    # outer loop), and a Gemini function call completes its OWN turn — the
+                    # spoken confirmation arrives in the NEXT receive() turn. Resetting this
+                    # per-iteration would drop the queued canvas action before the speech
+                    # turn's turn_complete flushes it (the bug where voice said "done" but
+                    # the port never changed). It is reset only after a successful flush.
+                    turn_tool_actions: list[Any] = []
                     while self._voice_active:
                         turn_transcript = ""
-                        turn_tool_actions: list[Any] = []
                         async for response in gemini.receive():
                             if not self._voice_active:
                                 return

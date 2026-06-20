@@ -584,10 +584,16 @@ Analyze the provided content and extract a COMPREHENSIVE list of REAL entities, 
 - If the user asks for "cities" and the content mentions 5 specific cities, return ONLY those 5 cities
 - VERIFY: Every entity in your response must be present in the provided content below
 
-**When NO content is provided (description only):**
-- Use your Google Search tool to find current, accurate information
-- Research the topic thoroughly to discover real entities
-- Provide at least 4-10 high-quality results
+**When LIVE WEB SEARCH RESULTS are provided below (no pre-fetched page content):**
+- These are real, current results fetched from the web for this topic — treat them as the provided content
+- Extract entities EXCLUSIVELY from these results; do NOT invent entities from training data
+- Prefer the most recent / current information and note dates where the results give them
+- For EVERY entity, append a citation line to its description using the matching SOURCES entry, formatted exactly as: "Source: <title> (date) — <url>"
+- Provide 4-10 high-quality results unless the user specified an exact count
+
+**When NEITHER fetched page content NOR live web search results are provided (description only):**
+- Use your best knowledge to discover real entities for the topic
+- State in each description that the information may not be current (no live source was available)
 
 ## EXTRACTION RULES
 1. RESPECT REQUESTED COUNT: If the user specifies a number (e.g. "best 5 cities", "top 3 universities"), create EXACTLY that many output ports. Not more, not less.

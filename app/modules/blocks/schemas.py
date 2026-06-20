@@ -11,6 +11,9 @@ class TopicGenerateRequest(BaseModel):
     inputs: List[str] = []
     outputs: List[str] = []
     description: str = ""
+    # None = auto-decide (ground only when no rich content was provided);
+    # True/False = force live-web grounding on/off.
+    ground: bool | None = None
 
 
 class RunSearchRequest(BaseModel):

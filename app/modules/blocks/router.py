@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 import json
 import uuid
 
@@ -86,12 +87,72 @@ def _simple_topic_response(body: TopicGenerateRequest) -> dict:
     }
 
 
+# A short/empty description is a user *query* ("best 5 ai tools 2026"), so we ground it in
+# live web results. A long description is already-fetched page content (the app puts
+# YouTube/website text here) and is trusted as-is — no live search.
+_GROUND_DESCRIPTION_MAX_CHARS = 400
+
+
+async def _gather_topic_grounding(
+    query: str,
+    max_results: int = 6,
+    crawl_top: int = 1,
+) -> tuple[str, list[str]]:
+    """Fetch live web sources so topic entities are real and current.
+
+    Reuses the research module (Tavily search + optional FireCrawl deep-crawl). Returns
+    ``(context_text, citations)`` for injection into the topic prompt, or ``("", [])`` when
+    Tavily is not configured or anything fails — grounding must never break generation.
+    """
+    settings = get_settings()
+    if not settings.tavily_api_key:
+        return "", []
+
+    try:
+        from app.modules.research.citations import (
+            extract_citations,
+            format_sources_for_context,
+        )
+        from app.modules.research.firecrawl_client import FirecrawlClient
+        from app.modules.research.tavily_client import TavilyClient
+
+        sources = await TavilyClient().search(
+            query=query,
+            max_results=max_results,
+            include_raw_content=True,
+            search_depth="advanced",
+        )
+        if not sources:
+            log.info("topic_grounding_empty", query=query)
+            return "", []
+
+        # Deep-crawl the top result(s) for richer, current content.
+        if crawl_top > 0 and settings.firecrawl_api_key:
+            firecrawl = FirecrawlClient()
+            for source in sources[:crawl_top]:
+                scraped = await firecrawl.scrape(source.url)
+                md = scraped.get("markdown", "")
+                if md:
+                    source.content = md[:3000]
+
+        log.info("topic_grounding_ok", query=query, sources=len(sources))
+        return format_sources_for_context(sources), extract_citations(sources)
+    except Exception as exc:
+        log.warning("topic_grounding_failed", query=query, error=str(exc))
+        return "", []
+
+
 @router.post("/generate/topic")
 async def generate_topic_block(
     body: TopicGenerateRequest,
     user: CurrentUser,
 ) -> dict:
-    """Generate a structured topic block using AI (OpenAI) or a simple template fallback."""
+    """Generate a structured topic block using AI (OpenAI) or a simple template fallback.
+
+    When the request carries only a short query (no pre-fetched page content), live web
+    results are fetched and injected so the extracted entities are real, current, and
+    source-cited instead of recalled from stale training data.
+    """
     settings = get_settings()
 
     if not settings.openai_api_key:
@@ -116,6 +177,28 @@ async def generate_topic_block(
         user_message += f"Requested output ports: {', '.join(body.outputs)}\n"
     if body.description:
         user_message += f"\nDescription / content to extract data from:\n{body.description[:3000]}"
+
+    # Ground the topic in live web data when no rich content was provided.
+    do_ground = (
+        body.ground
+        if body.ground is not None
+        else len(body.description.strip()) < _GROUND_DESCRIPTION_MAX_CHARS
+    )
+    if do_ground:
+        search_query = (body.description.strip() or name.replace("_", " ")).strip()
+        if body.outputs:
+            search_query += " " + " ".join(body.outputs)
+        context_text, citations = await _gather_topic_grounding(search_query)
+        if context_text:
+            today = datetime.date.today().isoformat()
+            user_message += (
+                f"\n\nLIVE WEB SEARCH RESULTS (fetched {today}; treat these as the provided "
+                "content — extract entities ONLY from them and prefer the most recent / "
+                f"current information):\n{context_text}\n\n"
+                "SOURCES (append the matching one to each entity's description as "
+                '"Source: <title> (date) — <url>"):\n'
+                + "\n".join(citations)
+            )
 
     try:
         from openai import AsyncOpenAI
