@@ -92,6 +92,9 @@ def _simple_topic_response(body: TopicGenerateRequest) -> dict:
 # YouTube/website text here) and is trusted as-is — no live search.
 _GROUND_DESCRIPTION_MAX_CHARS = 400
 
+# Search-block types whose Run/Regenerate output should be grounded in live web data.
+_GROUNDABLE_BLOCK_TYPES = {"topics", "components", "procedures"}
+
 
 async def _gather_topic_grounding(
     query: str,
@@ -140,6 +143,27 @@ async def _gather_topic_grounding(
     except Exception as exc:
         log.warning("topic_grounding_failed", query=query, error=str(exc))
         return "", []
+
+
+async def _augment_with_grounding(user_message: str, query: str) -> str:
+    """Append live web results + citations to a user message, or return it unchanged.
+
+    Shared by the topic generator and the run/search path so both inject grounding the
+    same way. Returns ``user_message`` untouched when grounding yields nothing (Tavily
+    unconfigured, empty results, or any failure) — grounding must never break generation.
+    """
+    context_text, citations = await _gather_topic_grounding(query)
+    if not context_text:
+        return user_message
+    today = datetime.date.today().isoformat()
+    return user_message + (
+        f"\n\nLIVE WEB SEARCH RESULTS (fetched {today}; treat these as the provided "
+        "content — extract facts ONLY from them and prefer the most recent / current "
+        f"information):\n{context_text}\n\n"
+        "SOURCES (append the matching one to each port's content as "
+        '"Source: <title> (date) — <url>"):\n'
+        + "\n".join(citations)
+    )
 
 
 async def generate_topic_payload(
@@ -194,17 +218,7 @@ async def generate_topic_payload(
         search_query = (description.strip() or name.replace("_", " ")).strip()
         if outputs:
             search_query += " " + " ".join(outputs)
-        context_text, citations = await _gather_topic_grounding(search_query)
-        if context_text:
-            today = datetime.date.today().isoformat()
-            user_message += (
-                f"\n\nLIVE WEB SEARCH RESULTS (fetched {today}; treat these as the provided "
-                "content — extract entities ONLY from them and prefer the most recent / "
-                f"current information):\n{context_text}\n\n"
-                "SOURCES (append the matching one to each entity's description as "
-                '"Source: <title> (date) — <url>"):\n'
-                + "\n".join(citations)
-            )
+        user_message = await _augment_with_grounding(user_message, search_query)
 
     from openai import AsyncOpenAI
 
@@ -396,6 +410,26 @@ async def run_search_block(
         user_message += "\n\nOUTPUT PORTS TO FILL:\n"
         for name in body.existing_output_ports:
             user_message += f"- {name}\n"
+
+    # Ground the output in live web data so the filled ports are real, current, and
+    # source-cited instead of recalled from stale training knowledge. Auto-decide by
+    # default: ground the search block types, but skip when the user already attached
+    # reference material (the app injects it under these markers) — that content is the
+    # trusted source. An explicit `ground` flag overrides the heuristic.
+    do_ground = (
+        body.ground
+        if body.ground is not None
+        else (
+            body.block_type in _GROUNDABLE_BLOCK_TYPES
+            and "YOUTUBE VIDEO CONTENT" not in body.context_message
+            and "WEBSITE CONTENT" not in body.context_message
+        )
+    )
+    if do_ground:
+        query = (
+            body.block_name.replace("_", " ") + " " + " ".join(body.existing_output_ports)
+        ).strip()
+        user_message = await _augment_with_grounding(user_message, query)
 
     try:
         result = await _call_openai_json(system_prompt, user_message, temperature=0.3)

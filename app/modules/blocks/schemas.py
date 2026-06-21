@@ -22,6 +22,9 @@ class RunSearchRequest(BaseModel):
     context_message: str
     existing_output_ports: List[str] = []
     recreate_ports: bool = False
+    # None = auto-decide (ground via live web search when no reference material
+    # was attached); True/False = force live-web grounding on/off.
+    ground: bool | None = None
 
 
 class RunSelectionRequest(BaseModel):

@@ -1167,6 +1167,14 @@ You will be given:
 - Input port values (context from connected upstream blocks)
 - Output port names and their descriptions (what you need to fill)
 - Optionally: reference material extracted from YouTube videos or websites
+- Optionally: LIVE WEB SEARCH RESULTS (real, current results fetched from the web for this block) and their SOURCES
+
+## CRITICAL: CONTENT-FIRST RULE
+When LIVE WEB SEARCH RESULTS are provided below:
+- These are real, current results fetched from the web for this block — treat them as the authoritative source.
+- Extract facts EXCLUSIVELY from these results; do NOT fill ports from training-data recall.
+- Prefer the most recent / current information and note dates where the results give them.
+- For EVERY port, append a citation line to its content using the matching SOURCES entry, formatted exactly as: "Source: <title> (date) — <url>".
 
 YOUR TASK: Synthesize all provided information and return a flat JSON object where each key is an output port name and the value is the detailed content for that port.
 
@@ -1174,8 +1182,8 @@ CRITICAL OUTPUT RULES:
 - Return ONLY valid JSON starting with { and ending with }
 - No markdown, no code blocks, no explanation, no extra text before or after the JSON
 - Include ALL listed output port names as keys
-- When reference material (YouTube/website content) is provided, extract and synthesize information primarily from it
-- When no reference material is provided, use the description and your knowledge to fill each port with relevant, detailed content
+- When LIVE WEB SEARCH RESULTS or reference material (YouTube/website content) is provided, extract and synthesize information primarily from it, and cite sources as described above
+- Only when NO live results and NO reference material are provided, fall back to the description and your knowledge to fill each port with relevant, detailed content
 
 EXAMPLE response format:
 {
@@ -1192,6 +1200,14 @@ You will be given:
 - Input port values (context from connected upstream blocks)
 - The block's CURRENT output port names (which you are free to keep, rename, remove, or extend)
 - Optionally: reference material extracted from YouTube videos or websites
+- Optionally: LIVE WEB SEARCH RESULTS (real, current results fetched from the web for this block) and their SOURCES
+
+## CRITICAL: CONTENT-FIRST RULE
+When LIVE WEB SEARCH RESULTS are provided below:
+- These are real, current results fetched from the web for this block — treat them as the authoritative source.
+- Design the output ports around what these results actually contain, and fill each port with facts EXCLUSIVELY from them; do NOT fill ports from training-data recall.
+- Prefer the most recent / current information and note dates where the results give them.
+- For EVERY port, append a citation line to its content using the matching SOURCES entry, formatted exactly as: "Source: <title> (date) — <url>".
 
 YOUR TASK: Decide the most useful set of output ports for this block based on the provided context, then return a flat JSON object where each key is an output port name YOU chose and the value is the detailed content for that port. Add new ports and drop irrelevant ones as needed - you are not required to reuse the current port names.
 
@@ -1199,8 +1215,8 @@ CRITICAL OUTPUT RULES:
 - Return ONLY valid JSON starting with { and ending with }
 - No markdown, no code blocks, no explanation, no extra text before or after the JSON
 - Choose clear, concise port names (lowercase words separated by underscores)
-- When reference material (YouTube/website content) is provided, extract and synthesize information primarily from it
-- When no reference material is provided, use the description and your knowledge to fill each port with relevant, detailed content
+- When LIVE WEB SEARCH RESULTS or reference material (YouTube/website content) is provided, extract and synthesize information primarily from it, and cite sources as described above
+- Only when NO live results and NO reference material are provided, fall back to the description and your knowledge to fill each port with relevant, detailed content
 
 EXAMPLE response format:
 {
