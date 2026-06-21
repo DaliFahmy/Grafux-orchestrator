@@ -249,6 +249,11 @@ class _OrchestratorSession:
         self._voice_active = False
         self._audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._voice_task: asyncio.Task | None = None
+        # Set when canvas/active-block state changes during a live voice session,
+        # so the relay can re-seed Gemini with fresh port data. _last_voice_context
+        # holds the last diagram context seeded into the live session.
+        self._canvas_dirty = asyncio.Event()
+        self._last_voice_context: str | None = None
         # Pending on-demand port reads, keyed by request_id → future resolved
         # when the client replies with a "port_content" message.
         self._pending_reads: dict[str, asyncio.Future[dict[str, Any]]] = {}
@@ -272,6 +277,8 @@ class _OrchestratorSession:
 
     async def cleanup(self) -> None:
         if self._voice_task and not self._voice_task.done():
+            self._voice_active = False
+            self._canvas_dirty.set()  # wake the refresh loop so it exits
             self._voice_task.cancel()
             await self._audio_queue.put(None)
             try:
@@ -307,9 +314,13 @@ class _OrchestratorSession:
             self._canvas_state = data.get("canvas_state", self._canvas_state)
             if data.get("saved_library") is not None:
                 self._saved_library = data["saved_library"]
+            if self._voice_active:
+                self._canvas_dirty.set()  # re-seed live voice with fresh port data
 
         elif msg_type == "set_active_blocks":
             self._active_blocks = data.get("blocks", self._active_blocks)
+            if self._voice_active:
+                self._canvas_dirty.set()
 
         elif msg_type == "port_content":
             req_id = data.get("request_id", "")
@@ -365,6 +376,38 @@ class _OrchestratorSession:
         finally:
             self._pending_reads.pop(request_id, None)
 
+    # ── Diagram context ──────────────────────────────────────────────────────
+
+    def _build_diagram_context(
+        self,
+        *,
+        budget: int | None = None,
+        lib_limit: int | None = None,
+        empty: str = "No diagram loaded.",
+    ) -> str:
+        """Render the current canvas + saved library as readable text.
+
+        Blocks and their port-file contents are rendered as text (active blocks
+        first) so the model can read and talk about port values directly. Shared
+        by the text turn and the voice relay (initial seed + mid-session refresh)
+        so both see the same up-to-date `self._canvas_state`.
+        """
+        parts: list[str] = []
+        canvas_text = (
+            _render_canvas_context(self._canvas_state, self._active_blocks, budget=budget)
+            if budget is not None
+            else _render_canvas_context(self._canvas_state, self._active_blocks)
+        )
+        if canvas_text:
+            parts.append("Current canvas blocks:\n" + canvas_text)
+        if self._saved_library:
+            lib = self._saved_library[:lib_limit] if lib_limit else self._saved_library
+            parts.append(
+                "Saved block library:\n"
+                + "\n".join(_format_library_entry(e) for e in lib)
+            )
+        return "\n\n".join(parts) if parts else empty
+
     # ── Text / AI turn ────────────────────────────────────────────────────────
 
     async def _run_text_turn(self, text: str) -> None:
@@ -380,21 +423,8 @@ class _OrchestratorSession:
         from app.prompts import get_system_prompt
         raw_prompt = get_system_prompt("chat_assistant")
 
-        # Build DIAGRAM_CONTEXT from whatever the client has sent. Blocks and
-        # their port-file contents are rendered as readable text (active blocks
-        # first), so the model can read and talk about port values directly.
-        diagram_ctx_parts: list[str] = []
-        canvas_text = _render_canvas_context(self._canvas_state, self._active_blocks)
-        if canvas_text:
-            diagram_ctx_parts.append("Current canvas blocks:\n" + canvas_text)
-        if self._saved_library:
-            lib_lines = [_format_library_entry(e) for e in self._saved_library]
-            diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines))
-        diagram_context = (
-            "\n\n".join(diagram_ctx_parts)
-            if diagram_ctx_parts
-            else "No diagram loaded yet."
-        )
+        # Build DIAGRAM_CONTEXT from whatever the client has sent.
+        diagram_context = self._build_diagram_context(empty="No diagram loaded yet.")
         system_prompt = raw_prompt.replace("{DIAGRAM_CONTEXT}", diagram_context)
 
         messages: list[dict[str, Any]] = [
@@ -625,6 +655,7 @@ class _OrchestratorSession:
             return
 
         self._voice_active = True
+        self._canvas_dirty.clear()
         await _send(self._ws, {"type": "voice_started"})
         self._voice_task = asyncio.create_task(self._gemini_voice_relay())
 
@@ -632,6 +663,7 @@ class _OrchestratorSession:
         if not self._voice_active:
             return
         self._voice_active = False
+        self._canvas_dirty.set()  # wake the refresh loop so it exits
         await self._audio_queue.put(None)  # signal relay to exit
         if self._voice_task and not self._voice_task.done():
             try:
@@ -655,16 +687,7 @@ class _OrchestratorSession:
             # Build Grafux context message for context seeding. Port-file
             # contents are rendered readably (active blocks first) so the voice
             # assistant can describe what each block/port contains.
-            diagram_ctx_parts: list[str] = []
-            canvas_text = _render_canvas_context(
-                self._canvas_state, self._active_blocks, budget=9000
-            )
-            if canvas_text:
-                diagram_ctx_parts.append("Current canvas blocks:\n" + canvas_text)
-            if self._saved_library:
-                lib_lines = [_format_library_entry(e) for e in self._saved_library[:30]]
-                diagram_ctx_parts.append("Saved block library:\n" + "\n".join(lib_lines))
-            diagram_context = "\n\n".join(diagram_ctx_parts) if diagram_ctx_parts else "No diagram loaded."
+            diagram_context = self._build_diagram_context(budget=9000, lib_limit=30)
 
             from app.modules.session.canvas_tools import get_live_tools_config
 
@@ -713,6 +736,7 @@ class _OrchestratorSession:
                     ],
                     turn_complete=False,
                 )
+                self._last_voice_context = diagram_context
 
                 async def _forward_to_gemini() -> None:
                     while True:
@@ -838,7 +862,50 @@ class _OrchestratorSession:
                                 turn_transcript = ""
                                 turn_tool_actions = []
 
-                await asyncio.gather(_forward_to_gemini(), _stream_from_gemini())
+                async def _refresh_to_gemini() -> None:
+                    """Re-seed Gemini with fresh diagram context when the canvas changes.
+
+                    The client keeps pushing `canvas_update` (with updated port-file
+                    contents) during a live session — e.g. after running a block or
+                    regenerating a tool. Without this, the voice assistant keeps
+                    answering from the snapshot taken at session start (the bug where
+                    the user had to Stop/Live to refresh). Debounced and change-gated
+                    so rapid edits don't flood the live session.
+                    """
+                    while self._voice_active:
+                        await self._canvas_dirty.wait()
+                        self._canvas_dirty.clear()
+                        await asyncio.sleep(1.5)  # coalesce 400ms update bursts / edits
+                        if not self._voice_active:
+                            return
+                        new_ctx = self._build_diagram_context(budget=9000, lib_limit=30)
+                        if new_ctx == self._last_voice_context:
+                            continue  # nothing port-relevant actually changed
+                        self._last_voice_context = new_ctx
+                        refresh_msg = (
+                            "The canvas has changed. Here is the UPDATED diagram context — "
+                            "use these current port values from now on:\n\n" + new_ctx
+                        )
+                        try:
+                            await gemini.send_client_content(
+                                turns=[
+                                    {"role": "user", "parts": [{"text": refresh_msg}]},
+                                    {"role": "model", "parts": [{"text": "Got it — I've refreshed my view of the canvas."}]},
+                                ],
+                                turn_complete=False,  # update history without speaking
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "voice_context_refresh_failed",
+                                session_id=self._session_id,
+                                error=str(exc),
+                            )
+
+                await asyncio.gather(
+                    _forward_to_gemini(),
+                    _stream_from_gemini(),
+                    _refresh_to_gemini(),
+                )
 
         except asyncio.CancelledError:
             raise
