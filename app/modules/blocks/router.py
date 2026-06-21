@@ -142,6 +142,95 @@ async def _gather_topic_grounding(
         return "", []
 
 
+async def generate_topic_payload(
+    *,
+    topic_name: str,
+    category: str = "general",
+    description: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    ground: bool | None = None,
+) -> dict | None:
+    """Generate a grounded topic block envelope (the `tool_calls` dict) via AI.
+
+    Shared core of the topic generator: builds the prompt, runs live web grounding when the
+    description is a short query, calls OpenAI with the [create_topic] prompt, and returns the
+    parsed ``{tool_calls, ...}`` result with output ports filled with real, current content.
+
+    Returns ``None`` when OpenAI is not configured or generation fails, so callers can fall back
+    (the REST endpoint to a simple template, the stream path to leaving the action unchanged).
+    """
+    settings = get_settings()
+    if not settings.openai_api_key:
+        return None
+
+    inputs = inputs or []
+    outputs = outputs or []
+    name = topic_name.replace(" ", "_")
+    cat = category or "general"
+
+    section = _BLOCK_TYPE_SECTION.get("topics", "create_topic")
+    system_prompt = (
+        get_system_prompt(section)
+        + "\n\nJSON FORMAT REFERENCE:\n"
+        + get_json_schema()
+    )
+
+    user_message = f"Topic name: {name}\nCategory: {cat}\n"
+    if inputs:
+        user_message += f"Requested input ports (besides 'description'): {', '.join(inputs)}\n"
+    if outputs:
+        user_message += f"Requested output ports: {', '.join(outputs)}\n"
+    if description:
+        user_message += f"\nDescription / content to extract data from:\n{description[:3000]}"
+
+    # Ground the topic in live web data when no rich content was provided.
+    do_ground = (
+        ground
+        if ground is not None
+        else len(description.strip()) < _GROUND_DESCRIPTION_MAX_CHARS
+    )
+    if do_ground:
+        search_query = (description.strip() or name.replace("_", " ")).strip()
+        if outputs:
+            search_query += " " + " ".join(outputs)
+        context_text, citations = await _gather_topic_grounding(search_query)
+        if context_text:
+            today = datetime.date.today().isoformat()
+            user_message += (
+                f"\n\nLIVE WEB SEARCH RESULTS (fetched {today}; treat these as the provided "
+                "content — extract entities ONLY from them and prefer the most recent / "
+                f"current information):\n{context_text}\n\n"
+                "SOURCES (append the matching one to each entity's description as "
+                '"Source: <title> (date) — <url>"):\n'
+                + "\n".join(citations)
+            )
+
+    from openai import AsyncOpenAI
+
+    client = AsyncOpenAI(api_key=settings.openai_api_key)
+    response = await client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+    )
+    content = response.choices[0].message.content or "{}"
+    result: dict = json.loads(content)
+
+    # Ensure block_id is filled
+    if result.get("tool_calls"):
+        params = result["tool_calls"][0].get("params", {})
+        if not params.get("block_id"):
+            params["block_id"] = uuid.uuid4().hex[:8]
+            result["tool_calls"][0]["params"] = params
+
+    return result
+
+
 @router.post("/generate/topic")
 async def generate_topic_block(
     body: TopicGenerateRequest,
@@ -159,70 +248,17 @@ async def generate_topic_block(
         log.info("blocks_generate_topic_fallback", reason="no_openai_key", topic=body.topic_name)
         return _simple_topic_response(body)
 
-    name = body.topic_name.replace(" ", "_")
-    cat = body.category
-
-    block_id_example = uuid.uuid4().hex[:8]
-    section = _BLOCK_TYPE_SECTION.get("topics", "create_topic")
-    system_prompt = (
-        get_system_prompt(section)
-        + "\n\nJSON FORMAT REFERENCE:\n"
-        + get_json_schema()
-    )
-
-    user_message = f"Topic name: {name}\nCategory: {cat}\n"
-    if body.inputs:
-        user_message += f"Requested input ports (besides 'description'): {', '.join(body.inputs)}\n"
-    if body.outputs:
-        user_message += f"Requested output ports: {', '.join(body.outputs)}\n"
-    if body.description:
-        user_message += f"\nDescription / content to extract data from:\n{body.description[:3000]}"
-
-    # Ground the topic in live web data when no rich content was provided.
-    do_ground = (
-        body.ground
-        if body.ground is not None
-        else len(body.description.strip()) < _GROUND_DESCRIPTION_MAX_CHARS
-    )
-    if do_ground:
-        search_query = (body.description.strip() or name.replace("_", " ")).strip()
-        if body.outputs:
-            search_query += " " + " ".join(body.outputs)
-        context_text, citations = await _gather_topic_grounding(search_query)
-        if context_text:
-            today = datetime.date.today().isoformat()
-            user_message += (
-                f"\n\nLIVE WEB SEARCH RESULTS (fetched {today}; treat these as the provided "
-                "content — extract entities ONLY from them and prefer the most recent / "
-                f"current information):\n{context_text}\n\n"
-                "SOURCES (append the matching one to each entity's description as "
-                '"Source: <title> (date) — <url>"):\n'
-                + "\n".join(citations)
-            )
-
     try:
-        from openai import AsyncOpenAI
-
-        client = AsyncOpenAI(api_key=settings.openai_api_key)
-        response = await client.chat.completions.create(
-            model=settings.openai_model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_message},
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.2,
+        result = await generate_topic_payload(
+            topic_name=body.topic_name,
+            category=body.category,
+            description=body.description,
+            inputs=body.inputs,
+            outputs=body.outputs,
+            ground=body.ground,
         )
-        content = response.choices[0].message.content or "{}"
-        result: dict = json.loads(content)
-
-        # Ensure block_id is filled
-        if result.get("tool_calls"):
-            params = result["tool_calls"][0].get("params", {})
-            if not params.get("block_id"):
-                params["block_id"] = uuid.uuid4().hex[:8]
-                result["tool_calls"][0]["params"] = params
-
+        if result is None:
+            return _simple_topic_response(body)
         log.info("blocks_generate_topic_ok", topic=body.topic_name)
         return result
 

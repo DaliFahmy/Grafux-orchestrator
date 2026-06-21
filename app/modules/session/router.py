@@ -483,56 +483,100 @@ class _OrchestratorSession:
             await _send(self._ws, {"type": "error", "message": str(exc)})
 
     async def _enrich_tool_actions(self, actions: list[Any]) -> None:
-        """Attach @register_tool-formatted Python to newly created tool blocks.
+        """Fill in heavy block content for newly created blocks so voice/text matches UnifiedWindow.
 
-        The client can run a tool the instant it is created only if the create_block
-        action carries correctly-formatted code — the same structural contract the manual
-        UnifiedWindow path produces. We generate it here (via the shared [create_tool]
-        prompt) so voice/text tools are no longer created empty.
+        Tools get @register_tool-formatted Python (via the shared [create_tool] prompt); topics
+        get real, current, source-cited output-port content (via the same grounded generator the
+        manual UnifiedWindow dialog calls). The client can then write/run the block immediately
+        instead of producing an empty stub.
 
-        Best-effort: any failure leaves `code` unset so the client's Regenerate (which now
-        uses the same prompt) can still fill it in.
+        Best-effort per action: any failure leaves the action unchanged so the turn still
+        completes (the client falls back to its own Regenerate / empty-port behavior).
         """
         if not actions:
             return
-        from app.modules.blocks.router import (
-            build_tool_codegen_message,
-            generate_tool_code,
-        )
         for action in actions:
             if not isinstance(action, dict):
                 continue
             if action.get("type") != "create_block":
                 continue
-            if str(action.get("block_type", "")).strip().lower() != "tools":
-                continue
-            if str(action.get("code", "")).strip():
-                continue  # model already supplied code inline
-            name = str(action.get("block_name", "")).strip()
-            description = str(action.get("description", "")).strip()
-            if not name or not description:
-                continue
-            try:
-                action["code"] = await generate_tool_code(
-                    build_tool_codegen_message(
-                        tool_name=name,
-                        description=description,
-                        inputs=action.get("inputs") or [],
-                        outputs=action.get("outputs") or [],
-                    )
+            block_type = str(action.get("block_type", "")).strip().lower()
+            if block_type == "tools":
+                await self._enrich_tool_block(action)
+            elif block_type == "topics":
+                await self._enrich_topic_block(action)
+
+    async def _enrich_tool_block(self, action: dict[str, Any]) -> None:
+        """Attach @register_tool-formatted Python to a newly created tool block."""
+        from app.modules.blocks.router import (
+            build_tool_codegen_message,
+            generate_tool_code,
+        )
+        if str(action.get("code", "")).strip():
+            return  # model already supplied code inline
+        name = str(action.get("block_name", "")).strip()
+        description = str(action.get("description", "")).strip()
+        if not name or not description:
+            return
+        try:
+            action["code"] = await generate_tool_code(
+                build_tool_codegen_message(
+                    tool_name=name,
+                    description=description,
+                    inputs=action.get("inputs") or [],
+                    outputs=action.get("outputs") or [],
                 )
-                log.info(
-                    "create_block_codegen_ok",
-                    session_id=self._session_id,
-                    block=name,
-                )
-            except Exception as exc:
-                log.warning(
-                    "create_block_codegen_failed",
-                    session_id=self._session_id,
-                    block=name,
-                    error=str(exc),
-                )
+            )
+            log.info("create_block_codegen_ok", session_id=self._session_id, block=name)
+        except Exception as exc:
+            log.warning(
+                "create_block_codegen_failed",
+                session_id=self._session_id,
+                block=name,
+                error=str(exc),
+            )
+
+    async def _enrich_topic_block(self, action: dict[str, Any]) -> None:
+        """Fill a newly created topic block's ports with grounded, current content.
+
+        Reuses the same grounded generator (Tavily/FireCrawl + [create_topic] prompt) the manual
+        UnifiedWindow path calls, then attaches the generated input/output ports — each with real
+        ``port_content`` — onto the action so the client writes a populated block, not an empty
+        stub. The ``outputs`` name list is preserved for backward compatibility / fallback.
+        """
+        from app.modules.blocks.router import generate_topic_payload
+
+        name = str(action.get("block_name", "")).strip()
+        if not name:
+            return
+        try:
+            result = await generate_topic_payload(
+                topic_name=name,
+                category=str(action.get("category", "")).strip() or "general",
+                description=str(action.get("description", "")).strip(),
+                inputs=action.get("inputs") or [],
+                outputs=action.get("outputs") or [],
+            )
+            params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+            output_ports = params.get("output_ports") or []
+            if not output_ports:
+                return  # nothing grounded — leave action as-is (client makes a stub)
+            action["output_ports"] = output_ports
+            if params.get("input_ports"):
+                action["input_ports"] = params["input_ports"]
+            log.info(
+                "create_topic_grounding_ok",
+                session_id=self._session_id,
+                block=name,
+                ports=len(output_ports),
+            )
+        except Exception as exc:
+            log.warning(
+                "create_topic_grounding_failed",
+                session_id=self._session_id,
+                block=name,
+                error=str(exc),
+            )
 
     async def _resolve_read_tool(self, args: dict[str, Any]) -> str:
         """Resolve a read_port_value tool call into a text result for the model."""
