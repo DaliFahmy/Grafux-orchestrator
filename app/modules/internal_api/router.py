@@ -8,8 +8,6 @@ from sqlalchemy import update
 
 from app.core.logging import get_logger
 from app.dependencies import DBSession, require_internal_service
-
-_internal = Depends(require_internal_service)
 from app.modules.internal_api.health import get_health
 from app.modules.internal_api.schemas import (
     CancelExecutionResponse,
@@ -20,6 +18,8 @@ from app.modules.internal_api.schemas import (
 )
 from app.modules.persistence.models import Execution
 from app.modules.persistence.repositories import ExecutionRepository
+
+_internal = Depends(require_internal_service)
 
 log = get_logger("internal_api")
 

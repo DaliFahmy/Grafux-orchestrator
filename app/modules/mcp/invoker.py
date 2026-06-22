@@ -3,21 +3,14 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import httpx
-from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential
-
 from app.core.logging import get_logger
+from app.core.resilience import retry_transient
 from app.modules.mcp.client import MCPClient
 
 log = get_logger("mcp.invoker")
 
 
-@retry(
-    retry=retry_if_exception_type(httpx.TransportError),
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=1, max=10),
-    reraise=True,
-)
+@retry_transient()
 async def invoke_tool(
     execution_id: str,
     tool_name: str,
@@ -61,8 +54,9 @@ async def invoke_tool(
                         duration_ms=duration_ms,
                     ))
                     await db.commit()
-            except Exception:
-                pass  # audit failure must not block execution
+            except Exception as audit_exc:
+                # Audit failure must not block execution — record why and move on.
+                log.debug("mcp_audit_write_failed", execution_id=execution_id, error=str(audit_exc))
 
         return result
 

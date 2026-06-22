@@ -3,10 +3,10 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 
 from app.dependencies import CurrentUser, require_internal_service
-
-_internal = Depends(require_internal_service)
 from app.modules.mcp.schemas import MCPInvokeRequest, MCPInvokeResponse, MCPTool
 from app.modules.mcp.service import MCPService
+
+_internal = Depends(require_internal_service)
 
 router = APIRouter(prefix="/mcp", tags=["mcp"])
 

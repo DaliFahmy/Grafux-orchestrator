@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import datetime
-import json
 import uuid
 
 from fastapi import APIRouter
@@ -10,21 +9,23 @@ from fastapi import APIRouter
 from app.config import get_settings
 from app.core.constants import (
     BLOCK_TYPE_SECTION as _BLOCK_TYPE_SECTION,
+)
+from app.core.constants import (
     GROUNDABLE_BLOCK_TYPES as _GROUNDABLE_BLOCK_TYPES,
 )
+from app.core.llm import _strip_code_fences, call_llm_json, call_llm_text
 from app.core.logging import get_logger
-from app.core.llm import call_llm_json, call_llm_text, _strip_code_fences
 from app.dependencies import CurrentUser
 from app.modules.blocks.schemas import (
-    TopicGenerateRequest,
     CodeGenerateRequest,
+    RegenerateFilterRequest,
+    RegenerateToolRequest,
+    RunFilterRequest,
     RunSearchRequest,
     RunSelectionRequest,
-    RunFilterRequest,
-    RegenerateToolRequest,
-    RegenerateFilterRequest,
+    TopicGenerateRequest,
 )
-from app.prompts import get_system_prompt, get_json_schema
+from app.prompts import get_json_schema, get_system_prompt
 
 log = get_logger("blocks.router")
 
@@ -132,7 +133,7 @@ async def _gather_topic_grounding(
                 *(firecrawl.scrape(s.url) for s in targets),
                 return_exceptions=True,
             )
-            for source, scraped in zip(targets, scraped_results):
+            for source, scraped in zip(targets, scraped_results, strict=False):
                 if isinstance(scraped, BaseException):
                     log.warning("topic_grounding_scrape_failed", url=source.url, error=str(scraped))
                     continue
@@ -563,8 +564,6 @@ async def run_search_block(
     user: CurrentUser,
 ) -> dict:
     """Fill (or, when recreate_ports is set, redesign) a search block's output ports."""
-    settings = get_settings()
-
     # Regenerate uses a prompt that lets the model redesign the port set; a regular
     # Run uses the fill prompt that keeps the existing ports and only refreshes content.
     system_prompt = (
@@ -629,7 +628,6 @@ async def run_selection_block(
     user: CurrentUser,
 ) -> dict:
     """Use AI to select the best candidate matching the given criteria."""
-    candidate_names = [c.get("name", "") for c in body.candidates]
     candidate_list = "\n".join(
         f"- {c.get('name', '')}: {c.get('value', '')}" for c in body.candidates
     )

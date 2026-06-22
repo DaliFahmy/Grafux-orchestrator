@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import pytest
-import pytest_asyncio
 from unittest.mock import AsyncMock, patch
+
+import pytest
 
 
 @pytest.mark.asyncio
@@ -55,6 +55,7 @@ async def test_execution_repository_create(db_session):
 @pytest.mark.asyncio
 async def test_execution_repository_update_status(db_session):
     from datetime import datetime
+
     from app.modules.persistence.repositories import ExecutionRepository
 
     repo = ExecutionRepository(db_session)
@@ -92,7 +93,6 @@ async def test_event_bus_emit():
 async def test_research_pipeline_no_api_key():
     """Research pipeline gracefully handles missing Tavily key."""
     with patch.dict("os.environ", {"TAVILY_API_KEY": ""}):
-        from importlib import reload
         import app.config as cfg
         cfg.get_settings.cache_clear()
 

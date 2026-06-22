@@ -8,7 +8,7 @@ from app.core.http_client import get_http_client
 from app.core.logging import get_logger
 from app.modules.research.citations import extract_citations, format_sources_for_context
 from app.modules.research.firecrawl_client import FirecrawlClient
-from app.modules.research.schemas import ResearchResponse, SearchResult
+from app.modules.research.schemas import SearchResult
 from app.modules.research.tavily_client import TavilyClient
 
 log = get_logger("research.pipeline")
@@ -49,7 +49,7 @@ class ResearchPipeline:
                 *(self._firecrawl.scrape(s.url) for s in targets),
                 return_exceptions=True,
             )
-            for source, scraped in zip(targets, scraped_results):
+            for source, scraped in zip(targets, scraped_results, strict=False):
                 if isinstance(scraped, BaseException):
                     log.warning("research_scrape_failed", url=source.url, error=str(scraped))
                     continue

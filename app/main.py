@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator
 
 import structlog
 from fastapi import FastAPI, HTTPException, Request, status
@@ -86,16 +86,17 @@ def create_app() -> FastAPI:
     app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 
     # ── Routers ────────────────────────────────────────────────────────────────
+    from app.modules.agent.router import router as agent_router
+    from app.modules.blocks.router import router as blocks_router
+    from app.modules.devices.router import router as devices_router
     from app.modules.internal_api.router import router as internal_router
-    from app.modules.workflow.router import executions_router, router as workflow_router
     from app.modules.mcp.router import router as mcp_router
+    from app.modules.queue.router import router as queue_router
     from app.modules.research.router import router as research_router
     from app.modules.sandbox.router import router as sandbox_router
-    from app.modules.devices.router import router as devices_router
-    from app.modules.agent.router import router as agent_router
-    from app.modules.queue.router import router as queue_router
     from app.modules.session.router import router as session_router
-    from app.modules.blocks.router import router as blocks_router
+    from app.modules.workflow.router import executions_router
+    from app.modules.workflow.router import router as workflow_router
 
     app.include_router(internal_router)
     app.include_router(workflow_router)
@@ -171,6 +172,7 @@ app = create_app()
 
 if __name__ == "__main__":
     import os
+
     import uvicorn
     settings = get_settings()
     uvicorn.run(

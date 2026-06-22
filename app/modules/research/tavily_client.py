@@ -38,9 +38,10 @@ class TavilyClient:
         except ImportError:
             # Fallback: try synchronous client in executor (older SDK)
             import asyncio
+
             from tavily import TavilyClient as SyncClient
             sync_client = SyncClient(api_key=self._api_key)
-            response = await asyncio.get_event_loop().run_in_executor(
+            response = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: sync_client.search(
                     query=query,

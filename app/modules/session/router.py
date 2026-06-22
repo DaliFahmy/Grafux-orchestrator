@@ -11,9 +11,17 @@ from app.core.logging import get_logger
 from app.core.security import verify_jwt
 from app.modules.session.canvas_context import (
     READ_PORT_TOOL,
+)
+from app.modules.session.canvas_context import (
     format_library_entry as _format_library_entry,
+)
+from app.modules.session.canvas_context import (
     parse_actions_tag as _parse_actions_tag,
+)
+from app.modules.session.canvas_context import (
     render_canvas_context as _render_canvas_context,
+)
+from app.modules.session.canvas_context import (
     render_port as _render_port,  # noqa: F401 — re-exported for tests
 )
 from app.modules.session.enrichment import enrich_actions
@@ -135,7 +143,7 @@ class _OrchestratorSession:
             await self._audio_queue.put(None)
             try:
                 await asyncio.wait_for(self._voice_task, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 pass
 
     # ── Message dispatch ──────────────────────────────────────────────────────
@@ -217,7 +225,7 @@ class _OrchestratorSession:
         })
         try:
             return await asyncio.wait_for(fut, timeout=timeout)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             log.warning(
                 "port_read_timeout",
                 session_id=self._session_id,
@@ -424,7 +432,7 @@ class _OrchestratorSession:
         if self._voice_task and not self._voice_task.done():
             try:
                 await asyncio.wait_for(self._voice_task, timeout=3.0)
-            except (asyncio.CancelledError, asyncio.TimeoutError):
+            except (TimeoutError, asyncio.CancelledError):
                 self._voice_task.cancel()
         self._voice_task = None
         await _send(self._ws, {"type": "voice_stopped"})
@@ -640,7 +648,7 @@ class _OrchestratorSession:
                             self._canvas_dirty.clear()
                             try:
                                 await asyncio.wait_for(self._canvas_dirty.wait(), timeout=1.5)
-                            except asyncio.TimeoutError:
+                            except TimeoutError:
                                 break  # 1.5s of quiet → process the latest canvas state
                         if not self._voice_active:
                             return

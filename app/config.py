@@ -59,7 +59,7 @@ class Settings(BaseSettings):
     celery_result_expires: int = 3600
 
     @model_validator(mode="after")
-    def _derive_redis_and_celery_urls(self) -> "Settings":
+    def _derive_redis_and_celery_urls(self) -> Settings:
         # Build redis_url from host/port when not provided as a full URL
         if not self.redis_url:
             self.redis_url = f"redis://{self.redis_host}:{self.redis_port}/0"

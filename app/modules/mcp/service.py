@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from app.modules.mcp.discovery import MCPDiscovery
 from app.modules.mcp.invoker import invoke_tool
 from app.modules.mcp.schemas import MCPInvokeRequest, MCPInvokeResponse, MCPTool

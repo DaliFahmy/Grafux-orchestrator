@@ -4,13 +4,11 @@ import asyncio
 import json
 
 import pytest
-
 from app.modules.session.router import (
     _OrchestratorSession,
     _render_canvas_context,
     _render_port,
 )
-
 
 # ── Canvas rendering ─────────────────────────────────────────────────────────
 

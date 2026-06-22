@@ -1,11 +1,9 @@
 from __future__ import annotations
 
-import asyncio
 import functools
 import operator
 import uuid
 from collections.abc import Awaitable, Callable
-from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
@@ -13,7 +11,7 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from app.config import get_settings
 from app.core.constants import route_tool_to_node
 from app.core.logging import get_logger
-from app.modules.streaming.event_bus import emit, emit_agent_thought, emit_log, emit_step
+from app.modules.streaming.event_bus import emit, emit_agent_thought, emit_log
 from app.shared import events as ev
 
 log = get_logger("workflow.engine")
@@ -76,8 +74,8 @@ async def agent_node(state: ExecutionState) -> dict[str, Any]:
         await emit_log(execution_id, error, level="error")
         return {"error": error}
 
+
     from app.core.llm import make_chat_model
-    from langchain_core.tools import tool as lc_tool
 
     await emit_log(execution_id, "Agent node: calling LLM", level="info", node="agent")
     await emit_agent_thought(execution_id, "agent", "Thinking...")
@@ -110,8 +108,9 @@ async def mcp_node(state: ExecutionState) -> dict[str, Any]:
     if not last_message or not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
         return {}
 
-    from app.modules.mcp.invoker import invoke_tool
     from langchain_core.messages import ToolMessage
+
+    from app.modules.mcp.invoker import invoke_tool
 
     tool_messages = []
     for tool_call in last_message.tool_calls:
@@ -156,8 +155,9 @@ async def research_node(state: ExecutionState) -> dict[str, Any]:
 
     await emit(execution_id, ev.RESEARCH_STARTED, {"query": query})
 
-    from app.modules.research.pipeline import ResearchPipeline
     from langchain_core.messages import ToolMessage
+
+    from app.modules.research.pipeline import ResearchPipeline
 
     pipeline = ResearchPipeline()
     try:
@@ -183,8 +183,9 @@ async def sandbox_node(state: ExecutionState) -> dict[str, Any]:
 
     await emit(execution_id, ev.SANDBOX_STARTED, {"code_length": len(code)})
 
-    from app.modules.sandbox.e2b_client import E2BClient
     from langchain_core.messages import ToolMessage
+
+    from app.modules.sandbox.e2b_client import E2BClient
 
     client = E2BClient()
     try:
@@ -218,8 +219,9 @@ async def device_node(state: ExecutionState) -> dict[str, Any]:
         "command": command,
     })
 
-    from app.modules.devices.client import DevicesClient
     from langchain_core.messages import ToolMessage
+
+    from app.modules.devices.client import DevicesClient
 
     client = DevicesClient()
     try:
@@ -322,7 +324,6 @@ class WorkflowEngine:
         Returns the final execution state.
         """
         from app.modules.workflow.checkpoints import get_postgres_checkpointer
-
         from app.prompts import get_system_prompt as _get_prompt
         initial_user_message = input_data.get("message") or input_data.get("prompt", "")
         messages: list[BaseMessage] = []

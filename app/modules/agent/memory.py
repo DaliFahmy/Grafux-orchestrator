@@ -60,6 +60,7 @@ class AgentMemory:
     ) -> dict[str, Any]:
         try:
             from sqlalchemy import select
+
             from app.core.database import get_db_session
             from app.modules.persistence.models import AgentSession
             async with get_db_session() as db:
@@ -80,6 +81,7 @@ class AgentMemory:
     ) -> None:
         try:
             from sqlalchemy import select
+
             from app.core.database import get_db_session
             from app.modules.persistence.models import AgentSession
             async with get_db_session() as db:

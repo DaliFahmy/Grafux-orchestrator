@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.persistence.models import WorkflowTemplate
 from app.modules.workflow.schemas import WorkflowTemplateResponse

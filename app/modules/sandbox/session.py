@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from typing import Any
-
 from app.core.logging import get_logger
 from app.modules.sandbox.e2b_client import E2BClient
 from app.modules.sandbox.schemas import SandboxExecuteRequest, SandboxExecuteResponse

@@ -34,7 +34,7 @@ async def get_health() -> HealthResponse:
         from app.core.celery_app import get_celery_app
         celery = get_celery_app()
         inspector = celery.control.inspect(timeout=1.0)
-        ping_result = await asyncio.get_event_loop().run_in_executor(
+        ping_result = await asyncio.get_running_loop().run_in_executor(
             None, inspector.ping
         )
         if not ping_result:

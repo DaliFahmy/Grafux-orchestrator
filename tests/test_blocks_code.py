@@ -3,7 +3,6 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
-
 from app.modules.blocks import router as blocks_router
 from app.modules.blocks.schemas import CodeGenerateRequest
 

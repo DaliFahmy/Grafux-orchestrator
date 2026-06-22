@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from app.core.exceptions import (
     ExecutionNotFoundError,
     orchestrator_error_handler,
@@ -36,9 +35,8 @@ async def test_orchestrator_error_handler_maps_status_and_schema():
 
 @pytest.mark.asyncio
 async def test_send_swallows_client_disconnect():
-    from fastapi import WebSocketDisconnect
-
     from app.modules.session.router import _send
+    from fastapi import WebSocketDisconnect
 
     class DisconnectedWS:
         async def send_text(self, text: str) -> None:

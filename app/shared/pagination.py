@@ -26,7 +26,7 @@ class PaginatedResponse(OrchestratorBaseModel, Generic[T]):
     pages: int
 
     @classmethod
-    def create(cls, items: list[T], total: int, params: PaginationParams) -> "PaginatedResponse[T]":
+    def create(cls, items: list[T], total: int, params: PaginationParams) -> PaginatedResponse[T]:
         pages = (total + params.page_size - 1) // params.page_size
         return cls(
             items=items,

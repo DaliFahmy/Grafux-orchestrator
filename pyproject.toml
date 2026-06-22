@@ -1,0 +1,50 @@
+[project]
+name = "grafux-orchestrator"
+version = "2.0.0"
+description = "Grafux Orchestrator — AI execution runtime (workflows, agents, LangGraph, Celery)."
+requires-python = ">=3.11"
+
+# Runtime dependencies are pinned in requirements.txt; dev/test tools in requirements-dev.txt.
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+src = ["app", "worker", "tests"]
+extend-exclude = ["migrations"]
+
+[tool.ruff.lint]
+# Pragmatic, high-signal set: pyflakes (F), pycodestyle (E/W), isort (I),
+# pyupgrade (UP), flake8-bugbear (B), comprehensions (C4).
+select = ["E", "W", "F", "I", "UP", "B", "C4"]
+ignore = [
+    "E501",   # line length is enforced by the formatter, not the linter
+    "B008",   # FastAPI uses function calls (Depends/Query) in argument defaults
+    "UP007",  # keep Optional[...]/Union[...] where already used for clarity
+    "UP042",  # `class X(str, Enum)` is intentional (str(member) differs from StrEnum)
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests favour terse fixtures and local imports.
+"tests/*" = ["E402", "F811"]
+# Re-exports for backward-compatible import paths.
+"app/shared/models.py" = ["F401"]
+"app/modules/session/router.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.11"
+# Lenient baseline — turn the screws module-by-module over time.
+ignore_missing_imports = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+no_implicit_optional = true
+check_untyped_defs = true
+exclude = ["migrations/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "strict"
+filterwarnings = [
+    "ignore::DeprecationWarning:celery.*",
+    "ignore::DeprecationWarning:kombu.*",
+]

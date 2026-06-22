@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-
 from app.core.constants import (
     NODE_DEVICE,
     NODE_MCP,

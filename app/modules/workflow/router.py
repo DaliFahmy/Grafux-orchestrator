@@ -5,7 +5,11 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from app.core.logging import get_logger
 from app.core.security import verify_jwt
 from app.dependencies import CurrentUser, DBSession
-from app.modules.persistence.repositories import ExecutionRepository, LogRepository, WorkflowRepository
+from app.modules.persistence.repositories import (
+    ExecutionRepository,
+    LogRepository,
+    WorkflowRepository,
+)
 from app.modules.streaming.websocket import connection_manager
 from app.modules.workflow.schemas import (
     ExecutionLogResponse,

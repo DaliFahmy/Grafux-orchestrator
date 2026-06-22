@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import AsyncGenerator
 
 import pytest
 import pytest_asyncio
@@ -27,9 +26,9 @@ def event_loop():
 @pytest_asyncio.fixture
 async def db_session():
     """In-memory SQLite session for unit tests."""
-    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-    from app.core.database import Base
     import app.modules.persistence.models  # noqa
+    from app.core.database import Base
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
     async with engine.begin() as conn:

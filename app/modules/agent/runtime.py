@@ -30,9 +30,10 @@ class AgentRuntime:
         if not settings.openai_api_key and not settings.anthropic_api_key:
             return {"error": "No LLM API key configured", "output": ""}
 
-        from app.core.llm import make_chat_model
         # langgraph-prebuilt is a required dep of langgraph>=1.0.0
         from langgraph.prebuilt import create_react_agent
+
+        from app.core.llm import make_chat_model
 
         # Load agent memory
         memory_data = await self._memory.load(execution_id, config.agent_id)
@@ -93,7 +94,7 @@ class AgentRuntime:
             description = td.get("description", "")
 
             if tool_type == "mcp":
-                def make_mcp(tname: str) -> StructuredTool:
+                def make_mcp(tname: str, tdesc: str) -> StructuredTool:
                     async def _run(**kwargs: Any) -> str:
                         from app.modules.mcp.invoker import invoke_tool
                         result = await invoke_tool(
@@ -106,9 +107,9 @@ class AgentRuntime:
                     return StructuredTool.from_function(
                         coroutine=_run,
                         name=tname,
-                        description=description,
+                        description=tdesc,
                     )
-                tools.append(make_mcp(name))
+                tools.append(make_mcp(name, description))
 
             elif tool_type == "research":
                 async def _research(query: str) -> str:

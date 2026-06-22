@@ -23,7 +23,7 @@ class ExecutionEvent(OrchestratorBaseModel):
         return json.dumps(self.model_dump())
 
     @classmethod
-    def from_json(cls, raw: str) -> "ExecutionEvent":
+    def from_json(cls, raw: str) -> ExecutionEvent:
         import json
         return cls(**json.loads(raw))
 

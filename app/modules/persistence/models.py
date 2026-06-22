@@ -4,7 +4,6 @@ from datetime import datetime  # noqa: F401 — referenced by Mapped[datetime] a
 
 from sqlalchemy import (
     JSON,
-    BigInteger,
     Boolean,
     DateTime,
     ForeignKey,
@@ -12,13 +11,12 @@ from sqlalchemy import (
     Integer,
     String,
     Text,
-    func,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-from app.shared.factories import generate_uuid as _uuid, utcnow as _now
-
+from app.shared.factories import generate_uuid as _uuid
+from app.shared.factories import utcnow as _now
 
 # ── Workflow ───────────────────────────────────────────────────────────────────
 
@@ -37,7 +35,7 @@ class Workflow(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=_now, onupdate=_now)
 
-    executions: Mapped[list["Execution"]] = relationship(
+    executions: Mapped[list[Execution]] = relationship(
         back_populates="workflow", lazy="noload"
     )
 
@@ -86,19 +84,19 @@ class Execution(Base):
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
-    workflow: Mapped["Workflow | None"] = relationship(
+    workflow: Mapped[Workflow | None] = relationship(
         back_populates="executions", lazy="noload"
     )
-    steps: Mapped[list["ExecutionStep"]] = relationship(
+    steps: Mapped[list[ExecutionStep]] = relationship(
         back_populates="execution", lazy="noload", cascade="all, delete-orphan"
     )
-    logs: Mapped[list["ExecutionLog"]] = relationship(
+    logs: Mapped[list[ExecutionLog]] = relationship(
         back_populates="execution", lazy="noload", cascade="all, delete-orphan"
     )
-    events: Mapped[list["ExecutionEvent"]] = relationship(
+    events: Mapped[list[ExecutionEvent]] = relationship(
         back_populates="execution", lazy="noload", cascade="all, delete-orphan"
     )
-    checkpoints: Mapped[list["WorkflowCheckpoint"]] = relationship(
+    checkpoints: Mapped[list[WorkflowCheckpoint]] = relationship(
         back_populates="execution", lazy="noload", cascade="all, delete-orphan"
     )
 
@@ -123,7 +121,7 @@ class ExecutionStep(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
 
-    execution: Mapped["Execution"] = relationship(
+    execution: Mapped[Execution] = relationship(
         back_populates="steps", lazy="noload"
     )
 
@@ -143,7 +141,7 @@ class ExecutionLog(Base):
     extra_data: Mapped[dict] = mapped_column(JSON, default=dict)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
-    execution: Mapped["Execution"] = relationship(
+    execution: Mapped[Execution] = relationship(
         back_populates="logs", lazy="noload"
     )
 
@@ -161,7 +159,7 @@ class ExecutionEvent(Base):
     payload: Mapped[dict] = mapped_column(JSON, default=dict)
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=_now, index=True)
 
-    execution: Mapped["Execution"] = relationship(
+    execution: Mapped[Execution] = relationship(
         back_populates="events", lazy="noload"
     )
 
@@ -199,7 +197,7 @@ class WorkflowCheckpoint(Base):
     checkpoint_data: Mapped[dict] = mapped_column(JSON, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_now)
 
-    execution: Mapped["Execution"] = relationship(
+    execution: Mapped[Execution] = relationship(
         back_populates="checkpoints", lazy="noload"
     )
 

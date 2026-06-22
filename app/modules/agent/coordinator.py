@@ -55,7 +55,7 @@ class MultiAgentCoordinator:
 
         # Step 3: Synthesise results
         outputs = []
-        for i, (sub_task, result) in enumerate(zip(sub_tasks, results)):
+        for sub_task, result in zip(sub_tasks, results, strict=False):
             if isinstance(result, Exception):
                 outputs.append(f"Agent {sub_task.get('agent_id')}: ERROR — {result}")
             else:

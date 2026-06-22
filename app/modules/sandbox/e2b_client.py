@@ -59,7 +59,6 @@ class E2BClient:
             try:
                 # Install required packages first
                 if packages:
-                    pkg_list = " ".join(packages)
                     await sbx.run_code(f"import subprocess; subprocess.run(['pip', 'install', '-q', {', '.join(repr(p) for p in packages)}], capture_output=True)")
 
                 # Execute the main code

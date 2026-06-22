@@ -21,10 +21,11 @@ class FirecrawlClient:
 
         try:
             import asyncio
+
             from firecrawl import FirecrawlApp
 
             app = FirecrawlApp(api_key=self._api_key)
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: app.scrape_url(
                     url,
@@ -43,10 +44,11 @@ class FirecrawlClient:
             return []
         try:
             import asyncio
+
             from firecrawl import FirecrawlApp
 
             app = FirecrawlApp(api_key=self._api_key)
-            result = await asyncio.get_event_loop().run_in_executor(
+            result = await asyncio.get_running_loop().run_in_executor(
                 None,
                 lambda: app.crawl_url(url, params={"limit": max_pages}),
             )

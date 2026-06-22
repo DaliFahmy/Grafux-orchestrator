@@ -5,7 +5,6 @@ import logging
 from typing import Any
 
 from celery import Task
-from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.celery_app import get_celery_app
 from app.modules.queue._helpers import run_async

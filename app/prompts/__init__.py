@@ -16,6 +16,6 @@ Usage:
     #   format_step2_topics, format_step2_commands,
     #   format_step2_components, format_step2_procedures, common
 """
-from app.prompts.loader import get_system_prompt, get_json_schema, list_sections
+from app.prompts.loader import get_json_schema, get_system_prompt, list_sections
 
 __all__ = ["get_system_prompt", "get_json_schema", "list_sections"]

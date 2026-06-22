@@ -6,6 +6,7 @@ from typing import Any
 from app.config import get_settings
 from app.core.http_client import get_http_client
 from app.core.logging import get_logger
+from app.core.resilience import retry_transient
 
 log = get_logger("devices.client")
 
@@ -66,8 +67,9 @@ class DevicesClient:
             )
             raise
 
+    @retry_transient()
     async def get_device_status(self, device_id: str) -> dict[str, Any]:
-        """Fetch the current status of a device."""
+        """Fetch the current status of a device (idempotent — safe to retry)."""
         try:
             resp = await get_http_client().get(
                 f"{self._base_url}/devices/{device_id}/status",
