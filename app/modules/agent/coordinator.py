@@ -85,7 +85,9 @@ class MultiAgentCoordinator:
         if not settings.openai_api_key:
             return [{"agent_id": agents[0].agent_id if agents else "agent", "task": task}]
 
-        import httpx, json
+        import json
+
+        from app.core.http_client import get_http_client
         agent_descriptions = "\n".join(
             f"- {a.agent_id}: {a.name} — {a.system_prompt[:100]}"
             for a in agents
@@ -96,21 +98,21 @@ class MultiAgentCoordinator:
             "Return a JSON array: [{\"agent_id\": \"...\", \"task\": \"...\"}]"
         )
         try:
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                    json={
-                        "model": settings.openai_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 1024,
-                        "response_format": {"type": "json_object"},
-                    },
-                )
-                if resp.status_code == 200:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    data = json.loads(content)
-                    return data if isinstance(data, list) else data.get("tasks", [])
+            resp = await get_http_client().post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 1024,
+                    "response_format": {"type": "json_object"},
+                },
+                timeout=30,
+            )
+            if resp.status_code == 200:
+                content = resp.json()["choices"][0]["message"]["content"]
+                data = json.loads(content)
+                return data if isinstance(data, list) else data.get("tasks", [])
         except Exception as exc:
             log.warning("task_decomposition_failed", error=str(exc))
         return [{"agent_id": agents[0].agent_id if agents else "agent", "task": task}]
@@ -124,25 +126,25 @@ class MultiAgentCoordinator:
         if not settings.openai_api_key:
             return "\n\n".join(agent_outputs)
 
-        import httpx
+        from app.core.http_client import get_http_client
         combined = "\n\n".join(agent_outputs)
         prompt = (
             f"Synthesise the following agent results into a coherent, comprehensive answer.\n\n"
             f"Original task: {original_task}\n\nAgent results:\n{combined[:6000]}"
         )
         try:
-            async with httpx.AsyncClient(timeout=60) as client:
-                resp = await client.post(
-                    "https://api.openai.com/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {settings.openai_api_key}"},
-                    json={
-                        "model": settings.openai_model,
-                        "messages": [{"role": "user", "content": prompt}],
-                        "max_tokens": 2048,
-                    },
-                )
-                if resp.status_code == 200:
-                    return resp.json()["choices"][0]["message"]["content"].strip()
+            resp = await get_http_client().post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization": f"Bearer {settings.openai_api_key}"},
+                json={
+                    "model": settings.openai_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": 2048,
+                },
+                timeout=60,
+            )
+            if resp.status_code == 200:
+                return resp.json()["choices"][0]["message"]["content"].strip()
         except Exception as exc:
             log.warning("synthesis_failed", error=str(exc))
         return "\n\n".join(agent_outputs)

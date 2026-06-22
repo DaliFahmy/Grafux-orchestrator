@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import uuid
-from datetime import datetime
+from datetime import datetime  # noqa: F401 — referenced by Mapped[datetime] annotations
 
 from sqlalchemy import (
     JSON,
@@ -18,14 +17,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base
-
-
-def _uuid() -> str:
-    return str(uuid.uuid4())
-
-
-def _now() -> datetime:
-    return datetime.utcnow()
+from app.shared.factories import generate_uuid as _uuid, utcnow as _now
 
 
 # ── Workflow ───────────────────────────────────────────────────────────────────

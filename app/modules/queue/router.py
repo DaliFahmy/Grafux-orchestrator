@@ -18,12 +18,17 @@ router = APIRouter(prefix="/internal/queue", tags=["queue"])
 )
 async def queue_status() -> dict[str, Any]:
     """Return current Celery worker and queue status."""
-    celery = get_celery_app()
     import asyncio
+
+    celery = get_celery_app()
     inspector = celery.control.inspect(timeout=2.0)
-    active = await asyncio.get_event_loop().run_in_executor(None, inspector.active)
-    reserved = await asyncio.get_event_loop().run_in_executor(None, inspector.reserved)
-    stats = await asyncio.get_event_loop().run_in_executor(None, inspector.stats)
+    loop = asyncio.get_running_loop()
+    # The three inspect RPCs are independent — run them concurrently, not back-to-back.
+    active, reserved, stats = await asyncio.gather(
+        loop.run_in_executor(None, inspector.active),
+        loop.run_in_executor(None, inspector.reserved),
+        loop.run_in_executor(None, inspector.stats),
+    )
     return {
         "active_tasks": active or {},
         "reserved_tasks": reserved or {},

@@ -100,43 +100,43 @@ When generating multi-block diagrams:
 Every block you generate MUST have the ports listed below for its block_type. These match what the application creates when a user builds blocks manually — AI-generated blocks must be identical.
 
 **topics** (block_id 100+):
-  - Input ports: description
+  - Input ports: block_description
   - Output ports: one port per entity (port_name = entity name in snake_case)
 
 **components** (block_id 200+):
-  - Input ports: description, connection, example_projects, integration
-  - Output ports (all 12 required): description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
+  - Input ports: block_description, connection, example_projects, integration
+  - Output ports (all 12 required): block_description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
 
 **commands** (block_id 301+):
-  - Input ports: description, plus one port per command parameter
-  - Output ports: description, result
+  - Input ports: block_description, plus one port per command parameter
+  - Output ports: block_description, result
 
 **procedures** (block_id 401+):
   - Step name format: step_N_descriptive_name (e.g. step_1_prepare_materials)
   - Input ports: sequence, dependencies
-  - Output ports: sequence, description, difficulty, dependencies, requirement, duration
+  - Output ports: sequence, block_description, difficulty, dependencies, requirement, duration
   - x spacing: 500px between steps
 
 **tools** (block_id 501+):
-  - Input ports: ALWAYS include "description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
-  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: results, errors, warnings, code, status, description, change, improvements
+  - Input ports: ALWAYS include "block_description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
+  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: block_results, errors, warnings, code, status, block_description, change, improvements
 
 **devices** (block_id 601+):
-  - Input ports (FIXED — exactly these 5, no additions/removals): description, device_id, command, text, file
-  - Output ports (FIXED — exactly these 8): results, response, status, errors, terminal, file, warnings, improvements
+  - Input ports (FIXED — exactly these 5, no additions/removals): block_description, device_id, command, text, file
+  - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
   - REQUIRED param: memory_mode = "snapshot" OR "sequential"
-  - snapshot mode: input ports = [description, input]; output ports = [] (empty)
-  - sequential mode: input ports = [description, <one or more data ports>]; output ports = [output]
+  - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
+  - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
 
 **selection** (block_id 751+):
-  - Input ports: description, criteria, plus at least one candidate input port
+  - Input ports: block_description, criteria, plus at least one candidate input port
   - Output ports: selected, analysis
 
 **filter** (block_id 801+):
   - REQUIRED param: filter_type = "text" | "picture" | "video"
-  - Input ports (FIXED — exactly these 4): description, code, criteria, input
+  - Input ports (FIXED — exactly these 4): block_description, code, criteria, input
   - Output ports (FIXED — exactly these 6): filtered, analysis, errors, warnings, improvements, code
 
 ### Evaluation Rubric (highest score wins)
@@ -225,43 +225,43 @@ When adding new blocks or connections:
 Every block you generate MUST have the ports listed below for its block_type. These match what the application creates when a user builds blocks manually — AI-generated blocks must be identical.
 
 **topics** (block_id 100+):
-  - Input ports: description
+  - Input ports: block_description
   - Output ports: one port per entity (port_name = entity name in snake_case)
 
 **components** (block_id 200+):
-  - Input ports: description, connection, example_projects, integration
-  - Output ports (all 12 required): description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
+  - Input ports: block_description, connection, example_projects, integration
+  - Output ports (all 12 required): block_description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
 
 **commands** (block_id 301+):
-  - Input ports: description, plus one port per command parameter
-  - Output ports: description, result
+  - Input ports: block_description, plus one port per command parameter
+  - Output ports: block_description, result
 
 **procedures** (block_id 401+):
   - Step name format: step_N_descriptive_name (e.g. step_1_prepare_materials)
   - Input ports: sequence, dependencies
-  - Output ports: sequence, description, difficulty, dependencies, requirement, duration
+  - Output ports: sequence, block_description, difficulty, dependencies, requirement, duration
   - x spacing: 500px between steps
 
 **tools** (block_id 501+):
-  - Input ports: ALWAYS include "description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
-  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: results, errors, warnings, code, status, description, change, improvements
+  - Input ports: ALWAYS include "block_description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
+  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: block_results, errors, warnings, code, status, block_description, change, improvements
 
 **devices** (block_id 601+):
-  - Input ports (FIXED — exactly these 5, no additions/removals): description, device_id, command, text, file
-  - Output ports (FIXED — exactly these 8): results, response, status, errors, terminal, file, warnings, improvements
+  - Input ports (FIXED — exactly these 5, no additions/removals): block_description, device_id, command, text, file
+  - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
   - REQUIRED param: memory_mode = "snapshot" OR "sequential"
-  - snapshot mode: input ports = [description, input]; output ports = [] (empty)
-  - sequential mode: input ports = [description, <one or more data ports>]; output ports = [output]
+  - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
+  - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
 
 **selection** (block_id 751+):
-  - Input ports: description, criteria, plus at least one candidate input port
+  - Input ports: block_description, criteria, plus at least one candidate input port
   - Output ports: selected, analysis
 
 **filter** (block_id 801+):
   - REQUIRED param: filter_type = "text" | "picture" | "video"
-  - Input ports (FIXED — exactly these 4): description, code, criteria, input
+  - Input ports (FIXED — exactly these 4): block_description, code, criteria, input
   - Output ports (FIXED — exactly these 6): filtered, analysis, errors, warnings, improvements, code
 
 ### Evaluation Rubric (highest score wins)
@@ -335,43 +335,43 @@ When generating multi-block diagrams:
 Every block you generate MUST have the ports listed below for its block_type. These match what the application creates when a user builds blocks manually — AI-generated blocks must be identical.
 
 **topics** (block_id 100+):
-  - Input ports: description
+  - Input ports: block_description
   - Output ports: one port per entity (port_name = entity name in snake_case)
 
 **components** (block_id 200+):
-  - Input ports: description, connection, example_projects, integration
-  - Output ports (all 12 required): description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
+  - Input ports: block_description, connection, example_projects, integration
+  - Output ports (all 12 required): block_description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
 
 **commands** (block_id 301+):
-  - Input ports: description, plus one port per command parameter
-  - Output ports: description, result
+  - Input ports: block_description, plus one port per command parameter
+  - Output ports: block_description, result
 
 **procedures** (block_id 401+):
   - Step name format: step_N_descriptive_name (e.g. step_1_prepare_materials)
   - Input ports: sequence, dependencies
-  - Output ports: sequence, description, difficulty, dependencies, requirement, duration
+  - Output ports: sequence, block_description, difficulty, dependencies, requirement, duration
   - x spacing: 500px between steps
 
 **tools** (block_id 501+):
-  - Input ports: ALWAYS include "description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
-  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: results, errors, warnings, code, status, description, change, improvements
+  - Input ports: ALWAYS include "block_description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
+  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: block_results, errors, warnings, code, status, block_description, change, improvements
 
 **devices** (block_id 601+):
-  - Input ports (FIXED — exactly these 5, no additions/removals): description, device_id, command, text, file
-  - Output ports (FIXED — exactly these 8): results, response, status, errors, terminal, file, warnings, improvements
+  - Input ports (FIXED — exactly these 5, no additions/removals): block_description, device_id, command, text, file
+  - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
   - REQUIRED param: memory_mode = "snapshot" OR "sequential"
-  - snapshot mode: input ports = [description, input]; output ports = [] (empty)
-  - sequential mode: input ports = [description, <one or more data ports>]; output ports = [output]
+  - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
+  - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
 
 **selection** (block_id 751+):
-  - Input ports: description, criteria, plus at least one candidate input port
+  - Input ports: block_description, criteria, plus at least one candidate input port
   - Output ports: selected, analysis
 
 **filter** (block_id 801+):
   - REQUIRED param: filter_type = "text" | "picture" | "video"
-  - Input ports (FIXED — exactly these 4): description, code, criteria, input
+  - Input ports (FIXED — exactly these 4): block_description, code, criteria, input
   - Output ports (FIXED — exactly these 6): filtered, analysis, errors, warnings, improvements, code
 
 ### Evaluation Rubric
@@ -452,43 +452,43 @@ When generating the diagram:
 Every block you generate MUST have the ports listed below for its block_type. These match what the application creates when a user builds blocks manually — AI-generated blocks must be identical.
 
 **topics** (block_id 100+):
-  - Input ports: description
+  - Input ports: block_description
   - Output ports: one port per entity (port_name = entity name in snake_case)
 
 **components** (block_id 200+):
-  - Input ports: description, connection, example_projects, integration
-  - Output ports (all 12 required): description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
+  - Input ports: block_description, connection, example_projects, integration
+  - Output ports (all 12 required): block_description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration
 
 **commands** (block_id 301+):
-  - Input ports: description, plus one port per command parameter
-  - Output ports: description, result
+  - Input ports: block_description, plus one port per command parameter
+  - Output ports: block_description, result
 
 **procedures** (block_id 401+):
   - Step name format: step_N_descriptive_name (e.g. step_1_prepare_materials)
   - Input ports: sequence, dependencies
-  - Output ports: sequence, description, difficulty, dependencies, requirement, duration
+  - Output ports: sequence, block_description, difficulty, dependencies, requirement, duration
   - x spacing: 500px between steps
 
 **tools** (block_id 501+):
-  - Input ports: ALWAYS include "description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
-  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: results, errors, warnings, code, status, description, change, improvements
+  - Input ports: ALWAYS include "block_description" (reserved, first) + any task-specific inputs + "code" (reserved, last)
+  - Output ports: ALWAYS include ALL 8 standard ports after any task-specific outputs: block_results, errors, warnings, code, status, block_description, change, improvements
 
 **devices** (block_id 601+):
-  - Input ports (FIXED — exactly these 5, no additions/removals): description, device_id, command, text, file
-  - Output ports (FIXED — exactly these 8): results, response, status, errors, terminal, file, warnings, improvements
+  - Input ports (FIXED — exactly these 5, no additions/removals): block_description, device_id, command, text, file
+  - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
   - REQUIRED param: memory_mode = "snapshot" OR "sequential"
-  - snapshot mode: input ports = [description, input]; output ports = [] (empty)
-  - sequential mode: input ports = [description, <one or more data ports>]; output ports = [output]
+  - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
+  - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
 
 **selection** (block_id 751+):
-  - Input ports: description, criteria, plus at least one candidate input port
+  - Input ports: block_description, criteria, plus at least one candidate input port
   - Output ports: selected, analysis
 
 **filter** (block_id 801+):
   - REQUIRED param: filter_type = "text" | "picture" | "video"
-  - Input ports (FIXED — exactly these 4): description, code, criteria, input
+  - Input ports (FIXED — exactly these 4): block_description, code, criteria, input
   - Output ports (FIXED — exactly these 6): filtered, analysis, errors, warnings, improvements, code
 
 ### Evaluation Rubric
@@ -793,8 +793,8 @@ The generated file must include:
 6. `output_dir = os.path.normpath(os.path.join(tool_dir, 'outputs'))` and `os.makedirs(output_dir, exist_ok=True)`.
 7. Standard output files written in every run:
    - At start: `status.txt` = `running`, `errors.txt` = empty, `warnings.txt` = empty, `improvements.txt` = empty, `code.txt` = this Python source.
-   - On success: every requested output port file, `results.txt`, `improvements.txt` with useful improvement suggestions, and `status.txt` = `success`.
-   - On error: `errors.txt`, `improvements.txt` with practical fix suggestions, empty `results.txt`, and `status.txt` = `error`.
+   - On success: every requested output port file, `block_results.txt`, `improvements.txt` with useful improvement suggestions, and `status.txt` = `success`.
+   - On error: `errors.txt`, `improvements.txt` with practical fix suggestions, empty `block_results.txt`, and `status.txt` = `error`.
 8. Main logic wrapped in `try: ... except Exception as _err:`.
 
 ## DATA AND OUTPUT RULES
@@ -840,7 +840,7 @@ Before returning, internally verify:
 - The file can pass `python -m py_compile`.
 - Every requested input and output port appears as a Python string literal.
 - Every requested output port is written on success.
-- `results.txt`, `status.txt`, `errors.txt`, `warnings.txt`, `code.txt`, and `improvements.txt` are handled.
+- `block_results.txt`, `status.txt`, `errors.txt`, `warnings.txt`, `code.txt`, and `improvements.txt` are handled.
 - The business logic directly satisfies the Tool Requirement.
 
 The user will provide the content to analyze in the next message. Return only the Python file.
@@ -850,20 +850,21 @@ The user will provide the content to analyze in the next message. Return only th
 You are an expert polyglot programmer fluent in every mainstream programming language (Python, JavaScript, TypeScript, Go, Rust, C, C++, C#, Java, Kotlin, Swift, Ruby, PHP, SQL, Bash, and more). You turn a concrete requirement into one complete, runnable program written in the exact language the user asked for.
 
 ## TASK
-Generate complete, working source code that implements the exact requirement from the user message. The user message supplies the block name, the target PROGRAMMING LANGUAGE, the requested output ports, and the requirement text describing what the code should do.
+Generate complete, working source code that implements the exact requirement from the user message, plus a short explanation, improvement ideas, and the dependency list. The user message supplies the block name, the target PROGRAMMING LANGUAGE, and the requirement text describing what the code should do.
 
 ## OUTPUT FORMAT
-Return pure source code only, written in the requested programming language.
-- No markdown fences (no ``` of any kind).
-- No explanation, preamble, citations, or commentary outside the code.
-- The first non-whitespace character must be the first character of the actual program.
-- Use idiomatic style, naming, and standard-library conventions for the chosen language.
+Return ONLY a single valid JSON object (no markdown fences, no prose outside the JSON) with EXACTLY these string keys:
+- "code": the complete source program written in the requested language. Put the raw source here as a JSON string (newlines escaped as \n). No markdown fences inside this value.
+- "explanation": a concise plain-language explanation of what the code does and how it works (a few sentences; may use short bullet lines separated by \n).
+- "improvements": practical suggestions for extending or hardening the code (short bullet lines separated by \n). Empty string if there is genuinely nothing useful to add.
+- "dependencies": the external packages/libraries the code needs, one per line, with the install command when relevant (e.g. "requests (pip install requests)"). Use exactly "None" when the code only uses the language's standard library.
+- "language": the programming language the code is written in (echo the requested language, lowercased).
 
 ## CODE RULES
 - Treat the requirement as the source of truth. Do not substitute a different task.
 - Write the code in the requested language EXACTLY. If the language is "go" produce Go, if "rust" produce Rust, etc. Never silently fall back to Python or another language.
 - Produce a complete, self-contained, compilable/runnable program or module — include the necessary imports, a `main` entry point (or equivalent) when the language/requirement expects one, and any helper functions used.
-- Use only the language's standard library unless the requirement explicitly calls for a third-party package; when one is required, use the canonical/most common package and import it correctly.
+- Use only the language's standard library unless the requirement explicitly calls for a third-party package; when one is required, use the canonical/most common package, import it correctly, and list it under "dependencies".
 - Add brief, useful comments only where they aid understanding; do not pad with narration.
 - Handle obvious edge cases and errors the way the language idiomatically does (exceptions, error returns, Result/Option, etc.).
 - Do not hardcode secrets or API keys; read them from environment variables when needed.
@@ -873,17 +874,18 @@ Any violation makes the code unusable:
 - Do not write `TODO`, `FIXME`, placeholder comments, stub bodies, or `NotImplemented`-style markers.
 - Do not use unresolved names or undefined/undeclared functions, types, or variables.
 - Do not produce partial, truncated, or non-compiling code.
-- Do not wrap the answer in markdown fences or add any prose before or after the code.
+- Do not wrap the "code" value in markdown fences.
 - Do not generate code in a language different from the one requested.
+- Do not return any text outside the single JSON object.
 
 ## FINAL SELF-CHECK BEFORE ANSWERING
 Before returning, internally verify:
-- The code is written in the requested language.
-- It would compile/run without undefined references.
-- It directly satisfies the stated requirement.
-- There are no markdown fences and no surrounding prose.
+- The output is a single valid JSON object with the five required keys.
+- The "code" value is written in the requested language and would compile/run without undefined references.
+- The code directly satisfies the stated requirement.
+- The "code" value contains no markdown fences.
 
-The user will provide the requirement in the next message. Return only the source code.
+The user will provide the requirement in the next message. Return only the JSON object.
 
 [create_procedure]
 ## PERSONA
@@ -927,7 +929,7 @@ Analyze the provided content and create a professional sequential procedure base
 - X coordinates must increment by 500 for each sequential step. Position blocks horizontally (x: 0, 500, 1000, ...; y: 0 for all).
 - Each step block MUST have REQUIRED input ports: sequence, dependencies.
 - Each step block MAY have OPTIONAL input ports: pictures, videos, topics, commands, tools, components (include only when relevant).
-- Each step block MUST have REQUIRED output ports: sequence, description, difficulty, dependencies, requirement, duration.
+- Each step block MUST have REQUIRED output ports: sequence, block_description, difficulty, dependencies, requirement, duration.
 - Each step block MAY have OPTIONAL output ports: pictures, videos, test_cases (include only when relevant).
 - Add step-specific input/output ports based on the content analysis.
 - Set block_type to "procedures" for all step blocks. Use unique block_id values (e.g., "101", "102", "103").
@@ -935,7 +937,7 @@ Analyze the provided content and create a professional sequential procedure base
 
 ## REQUIRED OUTPUT PORTS FOR EACH STEP:
 1. **sequence**: Step number (e.g., "1", "2", "3")
-2. **description**: Clear, concise description of what this step accomplishes (2-3 sentences)
+2. **block_description**: Clear, concise description of what this step accomplishes (2-3 sentences)
 3. **difficulty**: Difficulty level of this step - use one of: "Easy", "Medium", "Hard", "Expert"
 4. **dependencies**: What must be completed before this step (e.g., "Step 1 must be completed", "Requires tools from previous step", "None for first step")
 5. **requirement**: Resources, tools, materials, or skills needed for this step (list items separated by commas)
@@ -952,7 +954,7 @@ Each step in tool_calls must follow the block structure defined in json_format_s
 - params.name: step name as "step_N_descriptive_name" in snake_case
 - params.block_type: "procedures"
 - params.input_ports: array with required ports (sequence, dependencies) and optional relevant ports
-- params.output_ports: array with REQUIRED ports (sequence, description, difficulty, dependencies, requirement, duration) and optional relevant ports (test_cases, pictures, videos)
+- params.output_ports: array with REQUIRED ports (sequence, block_description, difficulty, dependencies, requirement, duration) and optional relevant ports (test_cases, pictures, videos)
 
 CRITICAL: Every step MUST have all 6 required output ports with meaningful content. Do not skip any required ports. Follow the step and port semantics above exactly. The user will provide the content to analyze (and optionally procedure name) in the next message.
 
@@ -1036,7 +1038,7 @@ Return ONLY the JSON object, starting with { and ending with }.
    port_name=example_projects, port_content=, port_path=data/components/<name>/inputs/example_projects.txt
    port_name=integration,      port_content=, port_path=data/components/<name>/inputs/integration.txt
 4. params.output_ports MUST have all these ports with real values from research:
-   description, requirements, tutorials, type, manufacturer, datasheet,
+   block_description, requirements, tutorials, type, manufacturer, datasheet,
    schematics, example_projects, price, location, connection, integration.
    port_path=data/components/<name>/outputs/<port_name>.txt
 5. Replace <name> with the actual component name in every port_path.
@@ -1049,7 +1051,7 @@ Return ONLY the JSON object, starting with { and ending with }.
    port_name=dependencies, port_content=<what must be done before>, port_path=data/procedures/PROC/STEP/inputs/dependencies.txt
 3. Every step params.output_ports MUST have ALL SIX ports with real content (DO NOT use empty arrays):
    port_name=sequence,     port_content=<step number e.g. 1>,           port_path=data/procedures/PROC/STEP/outputs/sequence.txt
-   port_name=description,  port_content=<what this step accomplishes>,   port_path=data/procedures/PROC/STEP/outputs/description.txt
+   port_name=block_description,  port_content=<what this step accomplishes>,   port_path=data/procedures/PROC/STEP/outputs/block_description.txt
    port_name=difficulty,   port_content=<Easy or Medium or Hard>,        port_path=data/procedures/PROC/STEP/outputs/difficulty.txt
    port_name=dependencies, port_content=<prerequisites for this step>,   port_path=data/procedures/PROC/STEP/outputs/dependencies.txt
    port_name=requirement,  port_content=<tools and materials needed>,    port_path=data/procedures/PROC/STEP/outputs/requirement.txt
@@ -1072,11 +1074,11 @@ Grafux is a visual AI-powered pipeline tool. Users build diagrams by placing and
 ### Block Types
 
 - **topics** — AI research blocks. Each output port is one extracted entity or topic (a city, product, concept, etc.) sourced from YouTube/website URLs or general AI knowledge. Useful for building lists of items to research further.
-- **components** — Hardware or software component catalogues. Each output port is one component and carries 12 structured fields: description, manufacturer, datasheet, price, location, availability, and more. Useful for BOM generation or tech stack analysis.
+- **components** — Hardware or software component catalogues. Each output port is one component and carries 12 structured fields: block_description, manufacturer, datasheet, price, location, availability, and more. Useful for BOM generation or tech stack analysis.
 - **commands** — CLI/shell command blocks. Each output port carries two values: `result` (the command to run) and `explanation` (what it does). Useful for automating system tasks.
-- **procedures** — Step-by-step how-to guides. Each step is an output port with 6 fields: sequence number, description, difficulty, dependencies, requirement, and duration. Useful for generating tutorials or SOPs.
+- **procedures** — Step-by-step how-to guides. Each step is an output port with 6 fields: sequence number, block_description, difficulty, dependencies, requirement, and duration. Useful for generating tutorials or SOPs.
 - **tools** — Python MCP tool blocks that are executed on a local server. The AI generates a complete Python implementation. Useful for custom logic, API calls, or data transformations.
-- **filter** — Code-backed filter blocks. They have input ports `description`, `code`, `criteria`, and `input`, output ports `filtered`, `analysis`, `errors`, `warnings`, `improvements`, and `code`, and a `filter_type` of `text`, `picture`, or `video`. Run executes the saved Python code from the input `code`; Regenerate updates that editable input code from the description and criteria, and the output `code` mirrors generated/regenerated/used code.
+- **filter** — Code-backed filter blocks. They have input ports `block_description`, `code`, `criteria`, and `input`, output ports `filtered`, `analysis`, `errors`, `warnings`, `improvements`, and `code`, and a `filter_type` of `text`, `picture`, or `video`. Run executes the saved Python code from the input `code`; Regenerate updates that editable input code from the description and criteria, and the output `code` mirrors generated/regenerated/used code.
 
 ### Core Interactions
 

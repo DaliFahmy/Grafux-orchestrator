@@ -8,6 +8,7 @@ from celery import Task
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from app.core.celery_app import get_celery_app
+from app.modules.queue._helpers import run_async
 
 celery_app = get_celery_app()
 log = logging.getLogger("queue.tasks")
@@ -136,22 +137,16 @@ async def _execute_workflow_async(
     default_retry_delay=20,
     queue="research",
 )
-def run_research_pipeline(
+@run_async
+async def run_research_pipeline(
     *,
     execution_id: str,
     query: str,
     org_id: str,
 ) -> dict[str, Any]:
-    return asyncio.run(_run_research_async(execution_id, query, org_id))
-
-
-async def _run_research_async(
-    execution_id: str, query: str, org_id: str
-) -> dict[str, Any]:
     from app.modules.research.pipeline import ResearchPipeline
     pipeline = ResearchPipeline()
-    result = await pipeline.run(query=query, execution_id=execution_id)
-    return result
+    return await pipeline.run(query=query, execution_id=execution_id)
 
 
 # ── Sandbox task ──────────────────────────────────────────────────────────────
@@ -161,17 +156,12 @@ async def _run_research_async(
     max_retries=1,
     queue="sandbox",
 )
-def run_sandbox_execution(
+@run_async
+async def run_sandbox_execution(
     *,
     execution_id: str,
     code: str,
     language: str = "python",
-) -> dict[str, Any]:
-    return asyncio.run(_run_sandbox_async(execution_id, code, language))
-
-
-async def _run_sandbox_async(
-    execution_id: str, code: str, language: str
 ) -> dict[str, Any]:
     from app.modules.sandbox.e2b_client import E2BClient
     client = E2BClient()
@@ -184,11 +174,8 @@ async def _run_sandbox_async(
     name="app.modules.queue.tasks.run_scheduled_workflow",
     queue="scheduled",
 )
-def run_scheduled_workflow(*, scheduled_task_id: str) -> None:
-    asyncio.run(_run_scheduled_async(scheduled_task_id))
-
-
-async def _run_scheduled_async(scheduled_task_id: str) -> None:
+@run_async
+async def run_scheduled_workflow(*, scheduled_task_id: str) -> None:
     from datetime import datetime
 
     from sqlalchemy import select
@@ -235,11 +222,8 @@ async def _run_scheduled_async(scheduled_task_id: str) -> None:
     name="app.modules.queue.tasks.cleanup_expired_executions",
     queue="default",
 )
-def cleanup_expired_executions() -> int:
-    return asyncio.run(_cleanup_async())
-
-
-async def _cleanup_async() -> int:
+@run_async
+async def cleanup_expired_executions() -> int:
     from datetime import datetime, timedelta
 
     from sqlalchemy import update
@@ -264,11 +248,8 @@ async def _cleanup_async() -> int:
     name="app.modules.queue.tasks.retry_failed_execution",
     queue="ai_heavy",
 )
-def retry_failed_execution(*, execution_id: str) -> dict[str, Any]:
-    return asyncio.run(_retry_execution_async(execution_id))
-
-
-async def _retry_execution_async(execution_id: str) -> dict[str, Any]:
+@run_async
+async def retry_failed_execution(*, execution_id: str) -> dict[str, Any]:
     from app.core.database import get_db_session
     from app.modules.persistence.repositories import ExecutionRepository
 

@@ -2,9 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import httpx
-
 from app.config import get_settings
+from app.core.http_client import get_http_client
 from app.core.logging import get_logger
 
 log = get_logger("mcp.client")
@@ -26,14 +25,14 @@ class MCPClient:
 
     async def list_tools(self) -> list[dict[str, Any]]:
         """Retrieve all available MCP tools from Grafux-mcp."""
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.get(
-                f"{self._base_url}/tools",
-                headers=self._headers(),
-            )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("tools", [])
+        resp = await get_http_client().get(
+            f"{self._base_url}/tools",
+            headers=self._headers(),
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return data.get("tools", [])
 
     async def invoke_tool(
         self,
@@ -47,12 +46,12 @@ class MCPClient:
             "input": tool_input,
             "execution_id": execution_id,
         }
-        async with httpx.AsyncClient(timeout=self._timeout) as client:
-            resp = await client.post(
-                f"{self._base_url}/invoke",
-                headers=self._headers(),
-                json=payload,
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            return result.get("output", result)
+        resp = await get_http_client().post(
+            f"{self._base_url}/invoke",
+            headers=self._headers(),
+            json=payload,
+            timeout=self._timeout,
+        )
+        resp.raise_for_status()
+        result = resp.json()
+        return result.get("output", result)

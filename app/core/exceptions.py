@@ -88,3 +88,16 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
         status_code=exc.status_code,
         content={"error": "http_error", "message": exc.detail},
     )
+
+
+async def validation_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+    """Return request-validation (422) errors in the house ``{error, message}`` schema.
+
+    ``exc`` is a Starlette/FastAPI ``RequestValidationError``; its ``errors()`` list is
+    attached under ``details`` so clients keep the per-field information.
+    """
+    details = exc.errors() if hasattr(exc, "errors") else None
+    return JSONResponse(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        content={"error": "validation_error", "message": "Request validation failed", "details": details},
+    )

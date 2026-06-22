@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 import json
 import uuid
@@ -7,7 +8,12 @@ import uuid
 from fastapi import APIRouter
 
 from app.config import get_settings
+from app.core.constants import (
+    BLOCK_TYPE_SECTION as _BLOCK_TYPE_SECTION,
+    GROUNDABLE_BLOCK_TYPES as _GROUNDABLE_BLOCK_TYPES,
+)
 from app.core.logging import get_logger
+from app.core.llm import call_llm_json, call_llm_text, _strip_code_fences
 from app.dependencies import CurrentUser
 from app.modules.blocks.schemas import (
     TopicGenerateRequest,
@@ -21,16 +27,6 @@ from app.modules.blocks.schemas import (
 from app.prompts import get_system_prompt, get_json_schema
 
 log = get_logger("blocks.router")
-
-# Map block_type → Msg_config section name
-_BLOCK_TYPE_SECTION: dict[str, str] = {
-    "topics": "create_topic",
-    "components": "create_component",
-    "commands": "create_cmd",
-    "tools": "create_tool",
-    "procedures": "create_procedure",
-    "code": "create_code",
-}
 
 router = APIRouter(prefix="/blocks", tags=["blocks"])
 
@@ -46,13 +42,13 @@ def _simple_topic_response(body: TopicGenerateRequest) -> dict:
 
     ip = [
         {
-            "port_name": "description",
+            "port_name": "block_description",
             "port_content": body.description,
-            "port_path": _make_port_path(cat, name, "inputs", "description"),
+            "port_path": _make_port_path(cat, name, "inputs", "block_description"),
         }
     ]
     for inp in body.inputs:
-        if inp and inp != "description":
+        if inp and inp not in ("description", "block_description"):
             ip.append({
                 "port_name": inp,
                 "port_content": "",
@@ -94,9 +90,6 @@ def _simple_topic_response(body: TopicGenerateRequest) -> dict:
 # YouTube/website text here) and is trusted as-is — no live search.
 _GROUND_DESCRIPTION_MAX_CHARS = 400
 
-# Search-block types whose Run/Regenerate output should be grounded in live web data.
-_GROUNDABLE_BLOCK_TYPES = {"topics", "components", "procedures"}
-
 
 async def _gather_topic_grounding(
     query: str,
@@ -131,12 +124,19 @@ async def _gather_topic_grounding(
             log.info("topic_grounding_empty", query=query)
             return "", []
 
-        # Deep-crawl the top result(s) for richer, current content.
+        # Deep-crawl the top result(s) for richer, current content (concurrently).
         if crawl_top > 0 and settings.firecrawl_api_key:
             firecrawl = FirecrawlClient()
-            for source in sources[:crawl_top]:
-                scraped = await firecrawl.scrape(source.url)
-                md = scraped.get("markdown", "")
+            targets = sources[:crawl_top]
+            scraped_results = await asyncio.gather(
+                *(firecrawl.scrape(s.url) for s in targets),
+                return_exceptions=True,
+            )
+            for source, scraped in zip(targets, scraped_results):
+                if isinstance(scraped, BaseException):
+                    log.warning("topic_grounding_scrape_failed", url=source.url, error=str(scraped))
+                    continue
+                md = (scraped or {}).get("markdown", "")
                 if md:
                     source.content = md[:3000]
 
@@ -176,6 +176,7 @@ async def generate_topic_payload(
     inputs: list[str] | None = None,
     outputs: list[str] | None = None,
     ground: bool | None = None,
+    model: str | None = None,
 ) -> dict | None:
     """Generate a grounded topic block envelope (the `tool_calls` dict) via AI.
 
@@ -187,7 +188,7 @@ async def generate_topic_payload(
     (the REST endpoint to a simple template, the stream path to leaving the action unchanged).
     """
     settings = get_settings()
-    if not settings.openai_api_key:
+    if not settings.openai_api_key and not settings.anthropic_api_key:
         return None
 
     inputs = inputs or []
@@ -204,7 +205,7 @@ async def generate_topic_payload(
 
     user_message = f"Topic name: {name}\nCategory: {cat}\n"
     if inputs:
-        user_message += f"Requested input ports (besides 'description'): {', '.join(inputs)}\n"
+        user_message += f"Requested input ports (besides 'block_description'): {', '.join(inputs)}\n"
     if outputs:
         user_message += f"Requested output ports: {', '.join(outputs)}\n"
     if description:
@@ -222,20 +223,9 @@ async def generate_topic_payload(
             search_query += " " + " ".join(outputs)
         user_message = await _augment_with_grounding(user_message, search_query)
 
-    from openai import AsyncOpenAI
-
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    response = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.2,
+    result: dict = await call_llm_json(
+        system_prompt, user_message, model=model, temperature=0.2,
     )
-    content = response.choices[0].message.content or "{}"
-    result: dict = json.loads(content)
 
     # Ensure block_id is filled
     if result.get("tool_calls"):
@@ -260,8 +250,8 @@ async def generate_topic_block(
     """
     settings = get_settings()
 
-    if not settings.openai_api_key:
-        log.info("blocks_generate_topic_fallback", reason="no_openai_key", topic=body.topic_name)
+    if not settings.openai_api_key and not settings.anthropic_api_key:
+        log.info("blocks_generate_topic_fallback", reason="no_llm_key", topic=body.topic_name)
         return _simple_topic_response(body)
 
     try:
@@ -272,6 +262,7 @@ async def generate_topic_block(
             inputs=body.inputs,
             outputs=body.outputs,
             ground=body.ground,
+            model=body.run_llm_model,
         )
         if result is None:
             return _simple_topic_response(body)
@@ -284,53 +275,38 @@ async def generate_topic_block(
         return _simple_topic_response(body)
 
 
-async def _call_openai_json(system_prompt: str, user_message: str, temperature: float = 0.3) -> dict:
-    """Shared helper: call OpenAI with response_format=json_object and return parsed dict."""
-    settings = get_settings()
-    if not settings.openai_api_key:
-        raise ValueError("OPENAI_API_KEY not configured")
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    response = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        response_format={"type": "json_object"},
-        temperature=temperature,
+async def _call_openai_json(
+    system_prompt: str,
+    user_message: str,
+    temperature: float = 0.3,
+    *,
+    model: str | None = None,
+    max_tokens: int = 4096,
+) -> dict:
+    """Shared helper: provider-routed JSON completion, returns a parsed dict.
+
+    Routes by the selected ``model`` id (claude-* → Anthropic, gpt-*/o3 → OpenAI);
+    falls back to the OpenAI default when ``model`` is empty/unknown.
+    """
+    return await call_llm_json(
+        system_prompt, user_message, model=model,
+        temperature=temperature, max_tokens=max_tokens,
     )
-    return json.loads(response.choices[0].message.content or "{}")
 
 
-async def _call_openai_text(system_prompt: str, user_message: str, temperature: float = 0.2) -> str:
-    """Shared helper: call OpenAI for raw text (no JSON mode) and return the message text."""
-    settings = get_settings()
-    if not settings.openai_api_key:
-        raise ValueError("OPENAI_API_KEY not configured")
-    from openai import AsyncOpenAI
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    response = await client.chat.completions.create(
-        model=settings.openai_model,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_message},
-        ],
-        temperature=temperature,
+async def _call_openai_text(
+    system_prompt: str,
+    user_message: str,
+    temperature: float = 0.2,
+    *,
+    model: str | None = None,
+    max_tokens: int = 4096,
+) -> str:
+    """Shared helper: provider-routed text completion, returns raw text."""
+    return await call_llm_text(
+        system_prompt, user_message, model=model,
+        temperature=temperature, max_tokens=max_tokens,
     )
-    return response.choices[0].message.content or ""
-
-
-def _strip_code_fences(text: str) -> str:
-    """Drop a leading/trailing markdown ``` fence if the model added one despite instructions."""
-    t = text.strip()
-    if t.startswith("```"):
-        nl = t.find("\n")
-        if nl != -1:
-            t = t[nl + 1:]          # drop the opening ``` / ```python line
-        if t.rstrip().endswith("```"):
-            t = t.rstrip()[:-3]     # drop the closing fence
-    return t.strip()
 
 
 def build_tool_codegen_message(
@@ -362,7 +338,7 @@ def build_tool_codegen_message(
     return "\n\n".join(parts)
 
 
-async def generate_tool_code(user_message: str, *, temperature: float = 0.2) -> str:
+async def generate_tool_code(user_message: str, *, temperature: float = 0.2, model: str | None = None) -> str:
     """Generate a complete @register_tool-formatted Python file from a tool requirement.
 
     Uses the shared [create_tool] Msg_config section — the same structural contract the
@@ -372,7 +348,7 @@ async def generate_tool_code(user_message: str, *, temperature: float = 0.2) -> 
     system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["tools"])
     if not system_prompt:
         raise ValueError("create_tool prompt section missing from Msg_config")
-    raw = await _call_openai_text(system_prompt, user_message, temperature=temperature)
+    raw = await _call_openai_text(system_prompt, user_message, temperature=temperature, model=model, max_tokens=8192)
     return _strip_code_fences(raw)
 
 
@@ -415,9 +391,10 @@ async def generate_code_payload(
 
     Mirrors :func:`generate_topic_payload` but produces source code in the requested
     ``language`` instead of researched entities: it calls OpenAI with the [create_code]
-    prompt as raw text (NOT JSON mode — code is plain text), strips any markdown fences, and
-    returns a ``{tool_calls, ...}`` envelope whose ``code`` output port holds the generated
-    source. No web grounding — code generation must not be polluted with live search results.
+    prompt in JSON mode and returns a ``{tool_calls, ...}`` envelope whose output ports
+    (``code``/``explanation``/``improvements``/``dependencies``/``language``) hold the
+    generated source plus its explanation, improvement ideas, and dependency list. No web
+    grounding — code generation must not be polluted with live search results.
 
     Returns ``None`` when OpenAI is not configured or generation fails, so callers can fall
     back (the REST endpoint to an empty-port stub, the stream path to leaving the action as-is).
@@ -441,7 +418,8 @@ async def generate_code_payload(
         outputs=outputs,
     )
 
-    code = _strip_code_fences(await _call_openai_text(system_prompt, user_message, temperature=0.2))
+    result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
+    code = _strip_code_fences(str(result.get("code", "")))
 
     op = [
         {
@@ -450,26 +428,31 @@ async def generate_code_payload(
             "port_path": _code_port_path(cat, name, "outputs", "code"),
         },
         {
-            "port_name": "status",
-            "port_content": "generated",
-            "port_path": _code_port_path(cat, name, "outputs", "status"),
+            "port_name": "explanation",
+            "port_content": str(result.get("explanation", "")),
+            "port_path": _code_port_path(cat, name, "outputs", "explanation"),
         },
         {
-            "port_name": "errors",
-            "port_content": "",
-            "port_path": _code_port_path(cat, name, "outputs", "errors"),
+            "port_name": "improvements",
+            "port_content": str(result.get("improvements", "")),
+            "port_path": _code_port_path(cat, name, "outputs", "improvements"),
         },
         {
-            "port_name": "warnings",
-            "port_content": "",
-            "port_path": _code_port_path(cat, name, "outputs", "warnings"),
+            "port_name": "dependencies",
+            "port_content": str(result.get("dependencies", "")),
+            "port_path": _code_port_path(cat, name, "outputs", "dependencies"),
+        },
+        {
+            "port_name": "language",
+            "port_content": str(result.get("language", "")).strip() or lang,
+            "port_path": _code_port_path(cat, name, "outputs", "language"),
         },
     ]
     ip = [
         {
-            "port_name": "description",
+            "port_name": "block_description",
             "port_content": description,
-            "port_path": _code_port_path(cat, name, "inputs", "description"),
+            "port_path": _code_port_path(cat, name, "inputs", "block_description"),
         },
         {
             "port_name": "language",
@@ -478,7 +461,7 @@ async def generate_code_payload(
         },
     ]
     for inp in inputs or []:
-        if inp and inp not in ("description", "language"):
+        if inp and inp not in ("description", "block_description", "language"):
             ip.append({
                 "port_name": inp,
                 "port_content": "",
@@ -524,15 +507,16 @@ def _simple_code_response(body: CodeGenerateRequest) -> dict:
                     "x": 0,
                     "y": 0,
                     "input_ports": [
-                        {"port_name": "description", "port_content": body.description,
-                         "port_path": _code_port_path(cat, name, "inputs", "description")},
+                        {"port_name": "block_description", "port_content": body.description,
+                         "port_path": _code_port_path(cat, name, "inputs", "block_description")},
                         {"port_name": "language", "port_content": lang,
                          "port_path": _code_port_path(cat, name, "inputs", "language")},
                     ],
                     "output_ports": [
-                        {"port_name": pn, "port_content": "",
+                        {"port_name": pn,
+                         "port_content": lang if pn == "language" else "",
                          "port_path": _code_port_path(cat, name, "outputs", pn)}
-                        for pn in ("code", "status", "errors", "warnings")
+                        for pn in ("code", "explanation", "improvements", "dependencies", "language")
                     ],
                 },
             }
@@ -631,7 +615,7 @@ async def run_search_block(
         user_message = await _augment_with_grounding(user_message, query)
 
     try:
-        result = await _call_openai_json(system_prompt, user_message, temperature=0.3)
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.3, model=body.run_llm_model)
         log.info("blocks_run_search_ok", block=body.block_name, block_type=body.block_type)
         return result
     except Exception as exc:
@@ -664,7 +648,7 @@ async def run_selection_block(
     )
 
     try:
-        result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.2, model=body.run_llm_model)
         log.info("blocks_run_selection_ok", block=body.block_name)
         return result
     except Exception as exc:
@@ -699,7 +683,7 @@ async def run_filter_block(
     )
 
     try:
-        result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.2, model=body.run_llm_model)
         log.info("blocks_run_filter_ok", block=body.block_name)
         return result
     except Exception as exc:
@@ -720,7 +704,7 @@ async def regenerate_tool_block(
     code, which is exactly the requirement text the prompt expects.
     """
     try:
-        code = await generate_tool_code(body.prompt, temperature=0.2)
+        code = await generate_tool_code(body.prompt, temperature=0.2, model=body.regen_llm_model)
         log.info("blocks_regenerate_tool_ok", block=body.block_name)
         # Leave description empty so the app keeps the user's existing description port;
         # only the code + change summary are authoritative here.
@@ -749,7 +733,7 @@ async def regenerate_filter_block(
     )
 
     try:
-        result = await _call_openai_json(system_prompt, body.prompt, temperature=0.3)
+        result = await _call_openai_json(system_prompt, body.prompt, temperature=0.3, model=body.regen_llm_model)
         log.info("blocks_regenerate_filter_ok", block=body.block_name)
         return result
     except Exception as exc:

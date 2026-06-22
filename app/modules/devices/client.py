@@ -3,9 +3,8 @@ from __future__ import annotations
 import time
 from typing import Any
 
-import httpx
-
 from app.config import get_settings
+from app.core.http_client import get_http_client
 from app.core.logging import get_logger
 
 log = get_logger("devices.client")
@@ -42,22 +41,22 @@ class DevicesClient:
             "params": params or {},
         }
         try:
-            async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(
-                    f"{self._base_url}/commands",
-                    headers=self._headers(),
-                    json=payload,
-                )
-                resp.raise_for_status()
-                result = resp.json()
-                duration_ms = int((time.monotonic() - start) * 1000)
-                log.info(
-                    "device_command_sent",
-                    device_id=device_id,
-                    command=command,
-                    duration_ms=duration_ms,
-                )
-                return result
+            resp = await get_http_client().post(
+                f"{self._base_url}/commands",
+                headers=self._headers(),
+                json=payload,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            duration_ms = int((time.monotonic() - start) * 1000)
+            log.info(
+                "device_command_sent",
+                device_id=device_id,
+                command=command,
+                duration_ms=duration_ms,
+            )
+            return result
         except Exception as exc:
             log.error(
                 "device_command_failed",
@@ -70,13 +69,13 @@ class DevicesClient:
     async def get_device_status(self, device_id: str) -> dict[str, Any]:
         """Fetch the current status of a device."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{self._base_url}/devices/{device_id}/status",
-                    headers=self._headers(),
-                )
-                resp.raise_for_status()
-                return resp.json()
+            resp = await get_http_client().get(
+                f"{self._base_url}/devices/{device_id}/status",
+                headers=self._headers(),
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return resp.json()
         except Exception as exc:
             log.error("device_status_failed", device_id=device_id, error=str(exc))
             raise
@@ -84,14 +83,14 @@ class DevicesClient:
     async def list_devices(self, org_id: str) -> list[dict[str, Any]]:
         """List all devices for an organisation."""
         try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                resp = await client.get(
-                    f"{self._base_url}/devices",
-                    headers=self._headers(),
-                    params={"org_id": org_id},
-                )
-                resp.raise_for_status()
-                return resp.json().get("devices", [])
+            resp = await get_http_client().get(
+                f"{self._base_url}/devices",
+                headers=self._headers(),
+                params={"org_id": org_id},
+                timeout=10.0,
+            )
+            resp.raise_for_status()
+            return resp.json().get("devices", [])
         except Exception as exc:
             log.error("device_list_failed", org_id=org_id, error=str(exc))
             return []

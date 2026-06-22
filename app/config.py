@@ -32,7 +32,8 @@ class Settings(BaseSettings):
     database_sync_url: str = (
         "postgresql+psycopg://postgres:postgres@localhost:5432/grafux_orchestrator"
     )
-    database_pool_size: int = 10
+    # Sized so concurrent workflow executions don't starve on connection checkout.
+    database_pool_size: int = 20
     database_max_overflow: int = 20
     database_pool_timeout: int = 30
 
@@ -42,7 +43,13 @@ class Settings(BaseSettings):
     redis_url: str = ""
     redis_host: str = "localhost"
     redis_port: int = 6379
-    redis_max_connections: int = 20
+    # Sized for many concurrent WebSocket sessions each publishing execution events.
+    redis_max_connections: int = 50
+
+    # ── Outbound HTTP (shared pooled client) ──────────────────────────────────
+    http_default_timeout: float = 30.0
+    http_max_connections: int = 100
+    http_max_keepalive_connections: int = 20
 
     # ── Celery ────────────────────────────────────────────────────────────────
     # Derived from redis_url in the validator below; can be overridden via env.
@@ -69,6 +76,8 @@ class Settings(BaseSettings):
     openai_embedding_model: str = "text-embedding-3-small"
     gemini_api_key: str = ""
     gemini_live_model: str = "gemini-3.1-flash-live-preview"
+    anthropic_api_key: str = ""               # env: ANTHROPIC_API_KEY
+    anthropic_model: str = "claude-opus-4-8"  # default Claude model for routing
 
     # ── External Services ─────────────────────────────────────────────────────
     e2b_api_key: str = ""

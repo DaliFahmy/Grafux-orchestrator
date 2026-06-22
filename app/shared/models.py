@@ -1,13 +1,19 @@
 from __future__ import annotations
 
-import uuid
 from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.shared.factories import generate_uuid  # re-exported for existing imports
 
-def generate_uuid() -> str:
-    return str(uuid.uuid4())
+__all__ = [
+    "generate_uuid",
+    "OrchestratorBaseModel",
+    "TimestampedModel",
+    "IDModel",
+    "BaseResponse",
+    "ErrorResponse",
+]
 
 
 class OrchestratorBaseModel(BaseModel):

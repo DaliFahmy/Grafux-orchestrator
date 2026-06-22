@@ -14,6 +14,8 @@ class TopicGenerateRequest(BaseModel):
     # None = auto-decide (ground only when no rich content was provided);
     # True/False = force live-web grounding on/off.
     ground: bool | None = None
+    # Selected AI model (e.g. "claude-opus-4-8", "gpt-5"); None → backend default.
+    run_llm_model: str | None = None
 
 
 class CodeGenerateRequest(BaseModel):
@@ -34,12 +36,14 @@ class RunSearchRequest(BaseModel):
     # None = auto-decide (ground via live web search when no reference material
     # was attached); True/False = force live-web grounding on/off.
     ground: bool | None = None
+    run_llm_model: str | None = None
 
 
 class RunSelectionRequest(BaseModel):
     block_name: str
     criteria: str
     candidates: List[Dict[str, Any]] = []
+    run_llm_model: str | None = None
 
 
 class RunFilterRequest(BaseModel):
@@ -49,14 +53,17 @@ class RunFilterRequest(BaseModel):
     code: str = ""
     criteria: str = ""
     input_value: str = ""
+    run_llm_model: str | None = None
 
 
 class RegenerateToolRequest(BaseModel):
     block_name: str
     prompt: str
+    regen_llm_model: str | None = None
 
 
 class RegenerateFilterRequest(BaseModel):
     block_name: str
     filter_type: str = "text"
     prompt: str
+    regen_llm_model: str | None = None

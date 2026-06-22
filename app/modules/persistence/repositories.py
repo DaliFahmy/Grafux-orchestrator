@@ -115,11 +115,15 @@ class StepRepository:
             update(ExecutionStep).where(ExecutionStep.id == step_id).values(**kwargs)
         )
 
-    async def list_by_execution(self, execution_id: str) -> list[ExecutionStep]:
+    async def list_by_execution(
+        self, execution_id: str, limit: int = 1000, offset: int = 0
+    ) -> list[ExecutionStep]:
         result = await self._db.execute(
             select(ExecutionStep)
             .where(ExecutionStep.execution_id == execution_id)
             .order_by(ExecutionStep.started_at)
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
@@ -150,13 +154,14 @@ class LogRepository:
         return obj
 
     async def list_by_execution(
-        self, execution_id: str, limit: int = 500
+        self, execution_id: str, limit: int = 500, offset: int = 0
     ) -> list[ExecutionLog]:
         result = await self._db.execute(
             select(ExecutionLog)
             .where(ExecutionLog.execution_id == execution_id)
             .order_by(ExecutionLog.timestamp)
             .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 
@@ -179,11 +184,15 @@ class EventRepository:
         await self._db.flush()
         return obj
 
-    async def list_by_execution(self, execution_id: str) -> list[ExecutionEvent]:
+    async def list_by_execution(
+        self, execution_id: str, limit: int = 1000, offset: int = 0
+    ) -> list[ExecutionEvent]:
         result = await self._db.execute(
             select(ExecutionEvent)
             .where(ExecutionEvent.execution_id == execution_id)
             .order_by(ExecutionEvent.timestamp)
+            .limit(limit)
+            .offset(offset)
         )
         return list(result.scalars().all())
 

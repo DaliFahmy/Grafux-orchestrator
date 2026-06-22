@@ -3,15 +3,22 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
+import structlog
 from fastapi import FastAPI, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from app.config import get_settings
 from app.core.database import create_all_tables, dispose_engine
-from app.core.exceptions import OrchestratorError, orchestrator_error_handler
+from app.core.exceptions import (
+    OrchestratorError,
+    orchestrator_error_handler,
+    validation_exception_handler,
+)
+from app.core.http_client import aclose_http_client
 from app.core.logging import configure_logging, get_logger
-from app.core.redis import close_redis
+from app.core.redis import close_redis, get_redis_client
 from app.modules.streaming.broadcaster import start_broadcaster, stop_broadcaster
 from app.modules.workflow.templates import TemplateService
 
@@ -42,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Graceful shutdown
     await stop_broadcaster()
     await close_redis()
+    await aclose_http_client()
     await dispose_engine()
     log.info("orchestrator_shutdown")
 
@@ -75,6 +83,7 @@ def create_app() -> FastAPI:
     # ── Exception handlers ─────────────────────────────────────────────────────
     app.add_exception_handler(OrchestratorError, orchestrator_error_handler)  # type: ignore[arg-type]
     app.add_exception_handler(HTTPException, _http_exception_handler)  # type: ignore[arg-type]
+    app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 
     # ── Routers ────────────────────────────────────────────────────────────────
     from app.modules.internal_api.router import router as internal_router
@@ -111,7 +120,6 @@ def create_app() -> FastAPI:
 # ── Middleware implementations ─────────────────────────────────────────────────
 
 async def _audit_log_middleware(request: Request, call_next):
-    import structlog
     structlog.contextvars.clear_contextvars()
     structlog.contextvars.bind_contextvars(
         method=request.method,
@@ -133,7 +141,6 @@ async def _rate_limit_middleware(request: Request, call_next):
     client_ip = request.client.host if request.client else "unknown"
 
     try:
-        from app.core.redis import get_redis_client
         redis = get_redis_client()
         key = f"rate_limit:{client_ip}"
         current = await redis.incr(key)
@@ -144,8 +151,9 @@ async def _rate_limit_middleware(request: Request, call_next):
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={"error": "rate_limit_exceeded", "message": "Too many requests"},
             )
-    except Exception:
-        pass  # Redis unavailable — allow request through
+    except Exception as exc:
+        # Redis unavailable — fail open (allow request) but record why.
+        log.debug("rate_limit_unavailable", error=str(exc))
 
     return await call_next(request)
 

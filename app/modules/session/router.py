@@ -9,176 +9,28 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from app.core.logging import get_logger
 from app.core.security import verify_jwt
+from app.modules.session.canvas_context import (
+    READ_PORT_TOOL,
+    format_library_entry as _format_library_entry,
+    parse_actions_tag as _parse_actions_tag,
+    render_canvas_context as _render_canvas_context,
+    render_port as _render_port,  # noqa: F401 — re-exported for tests
+)
+from app.modules.session.enrichment import enrich_actions
 
 log = get_logger("session.router")
 
 router = APIRouter()
 
 
-def _format_library_entry(entry: dict[str, Any]) -> str:
-    """Format one saved-library entry for DIAGRAM_CONTEXT."""
-    block_type = entry.get("block_type", "")
-    block_name = entry.get("block_name", "")
-    category = entry.get("category", "")
-    if category:
-        return (
-            f'  block_type="{block_type}" category="{category}" block_name="{block_name}"'
-        )
-    return f'  block_type="{block_type}" block_name="{block_name}"'
-
-
-# OpenAI tool schema for the on-demand port read (text path). Mutations stay on
-# the ##ACTIONS## tag; only reads are a real round-trip tool.
-READ_PORT_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "read_port_value",
-        "description": (
-            "Read the FULL current content of a block's input or output port file. "
-            "Use this when the user asks what a port or block contains, to summarize or "
-            "explain port data, or when the canvas context marks a value as truncated."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target_block": {"type": "string", "description": "Block name on the canvas."},
-                "direction": {"type": "string", "description": "Must be 'input' or 'output'."},
-                "port_name": {"type": "string", "description": "Port name (snake_case)."},
-            },
-            "required": ["target_block", "direction", "port_name"],
-        },
-    },
-}
-
-
-def _render_port(port: dict[str, Any]) -> str:
-    """Render one port object (from the client) as a readable line."""
-    name = port.get("name", "")
-    direction = "out" if port.get("is_output") else "in"
-    value = port.get("value", "")
-    if value == "" or value is None:
-        value = "(empty)"
-    line = f'    [{direction}] {name}: {value}'
-    if port.get("truncated"):
-        full_len = port.get("full_length")
-        shown = len(str(port.get("value", "")))
-        suffix = (
-            f" …(truncated: showing {shown} of {full_len} chars — "
-            "call read_port_value to read the full file)"
-        )
-        line += suffix
-    return line
-
-
-def _render_block(block: dict[str, Any], *, active: bool) -> str:
-    """Render one block (name, type, status, description, ports, connections)."""
-    name = block.get("name", "")
-    btype = block.get("type", "")
-    status = block.get("status", "")
-    header = f'Block "{name}" ({btype}, {status})'
-    if active:
-        header += "  [ACTIVE]"
-    lines = [header]
-    desc = (block.get("description") or "").strip()
-    if desc:
-        lines.append(f"  description: {desc}")
-    ports = block.get("ports") or []
-    if ports:
-        lines.append("  ports:")
-        lines.extend(_render_port(p) for p in ports if isinstance(p, dict))
-    conns = block.get("connections") or []
-    if conns:
-        for c in conns:
-            if isinstance(c, dict):
-                lines.append(
-                    f'  connection: {c.get("from_port","")} -> '
-                    f'{c.get("to_block","")}.{c.get("to_port","")}'
-                )
-    return "\n".join(lines)
-
-
-def _render_canvas_context(
-    canvas_state: dict[str, Any],
-    active_blocks: list[Any],
-    *,
-    budget: int = 12000,
-) -> str:
-    """Render the canvas as readable text for the model, active blocks first.
-
-    Active blocks are emitted before the rest (and never dropped) so the model
-    always sees full context for what the user is focused on. Remaining blocks
-    fill the character budget; any overflow is noted, not silently dropped.
-    """
-    blocks = (canvas_state or {}).get("blocks") or []
-    active_names = {
-        b.get("name") for b in (active_blocks or []) if isinstance(b, dict) and b.get("name")
-    }
-
-    # Active blocks: prefer the richer active_blocks payload, fall back to canvas.
-    active_rendered: list[str] = []
-    seen: set[str] = set()
-    for b in (active_blocks or []):
-        if isinstance(b, dict) and b.get("name"):
-            active_rendered.append(_render_block(b, active=True))
-            seen.add(b.get("name"))
-    for b in blocks:
-        if isinstance(b, dict) and b.get("name") in active_names and b.get("name") not in seen:
-            active_rendered.append(_render_block(b, active=True))
-            seen.add(b.get("name"))
-
-    other_rendered: list[str] = [
-        _render_block(b, active=False)
-        for b in blocks
-        if isinstance(b, dict) and b.get("name") not in active_names
-    ]
-
-    parts: list[str] = []
-    used = 0
-    # Active blocks are always included.
-    for chunk in active_rendered:
-        parts.append(chunk)
-        used += len(chunk) + 2
-    omitted = 0
-    for chunk in other_rendered:
-        if used + len(chunk) > budget:
-            omitted += 1
-            continue
-        parts.append(chunk)
-        used += len(chunk) + 2
-    if omitted:
-        parts.append(
-            f"…({omitted} more block(s) not shown to save space; ask about them "
-            "by name and call read_port_value for their port contents.)"
-        )
-    return "\n\n".join(parts) if parts else ""
-
-
-def _parse_actions_tag(full_text: str, session_id: str) -> tuple[str, list[Any]]:
-    """Extract ##ACTIONS## JSON from model text; log parse failures."""
-    marker = "##ACTIONS##"
-    idx = full_text.rfind(marker)
-    if idx == -1:
-        return full_text, []
-    json_str = full_text[idx + len(marker):].strip()
-    display_text = full_text[:idx].rstrip()
-    try:
-        parsed = json.loads(json_str)
-        return display_text, parsed.get("actions", [])
-    except Exception as exc:
-        log.warning(
-            "actions_parse_failed",
-            session_id=session_id,
-            error=str(exc),
-            snippet=json_str[:200],
-        )
-        return display_text, []
-
-
 async def _send(websocket: WebSocket, data: dict[str, Any]) -> None:
     try:
         await websocket.send_text(json.dumps(data))
-    except Exception:
-        pass
+    except WebSocketDisconnect:
+        pass  # client already gone — nothing to deliver
+    except Exception as exc:
+        # Closed/broken socket mid-turn is expected; don't crash the turn.
+        log.debug("ws_send_failed", error=str(exc))
 
 
 @router.websocket("/ws/session")
@@ -433,8 +285,8 @@ class _OrchestratorSession:
         ]
 
         try:
-            from openai import AsyncOpenAI
-            client = AsyncOpenAI(api_key=settings.openai_api_key)
+            from app.core.llm import get_async_openai
+            client = get_async_openai()
 
             # Tool-use loop: the model may call read_port_value (resolved via a
             # round-trip to the client) before producing its final answer.
@@ -503,7 +355,7 @@ class _OrchestratorSession:
                     })
 
             display_text, actions = _parse_actions_tag(full_text, self._session_id)
-            await self._enrich_tool_actions(actions)
+            await enrich_actions(actions, self._session_id)
 
             self._history.append({"role": "assistant", "content": display_text})
             await _send(self._ws, {"type": "turn_complete", "full_text": display_text, "actions": actions})
@@ -511,148 +363,6 @@ class _OrchestratorSession:
         except Exception as exc:
             log.error("ai_turn_error", session_id=self._session_id, error=str(exc))
             await _send(self._ws, {"type": "error", "message": str(exc)})
-
-    async def _enrich_tool_actions(self, actions: list[Any]) -> None:
-        """Fill in heavy block content for newly created blocks so voice/text matches UnifiedWindow.
-
-        Tools get @register_tool-formatted Python (via the shared [create_tool] prompt); topics
-        get real, current, source-cited output-port content (via the same grounded generator the
-        manual UnifiedWindow dialog calls). The client can then write/run the block immediately
-        instead of producing an empty stub.
-
-        Best-effort per action: any failure leaves the action unchanged so the turn still
-        completes (the client falls back to its own Regenerate / empty-port behavior).
-        """
-        if not actions:
-            return
-        for action in actions:
-            if not isinstance(action, dict):
-                continue
-            if action.get("type") != "create_block":
-                continue
-            block_type = str(action.get("block_type", "")).strip().lower()
-            if block_type == "tools":
-                await self._enrich_tool_block(action)
-            elif block_type == "topics":
-                await self._enrich_topic_block(action)
-            elif block_type == "code":
-                await self._enrich_code_block(action)
-
-    async def _enrich_tool_block(self, action: dict[str, Any]) -> None:
-        """Attach @register_tool-formatted Python to a newly created tool block."""
-        from app.modules.blocks.router import (
-            build_tool_codegen_message,
-            generate_tool_code,
-        )
-        if str(action.get("code", "")).strip():
-            return  # model already supplied code inline
-        name = str(action.get("block_name", "")).strip()
-        description = str(action.get("description", "")).strip()
-        if not name or not description:
-            return
-        try:
-            action["code"] = await generate_tool_code(
-                build_tool_codegen_message(
-                    tool_name=name,
-                    description=description,
-                    inputs=action.get("inputs") or [],
-                    outputs=action.get("outputs") or [],
-                )
-            )
-            log.info("create_block_codegen_ok", session_id=self._session_id, block=name)
-        except Exception as exc:
-            log.warning(
-                "create_block_codegen_failed",
-                session_id=self._session_id,
-                block=name,
-                error=str(exc),
-            )
-
-    async def _enrich_topic_block(self, action: dict[str, Any]) -> None:
-        """Fill a newly created topic block's ports with grounded, current content.
-
-        Reuses the same grounded generator (Tavily/FireCrawl + [create_topic] prompt) the manual
-        UnifiedWindow path calls, then attaches the generated input/output ports — each with real
-        ``port_content`` — onto the action so the client writes a populated block, not an empty
-        stub. The ``outputs`` name list is preserved for backward compatibility / fallback.
-        """
-        from app.modules.blocks.router import generate_topic_payload
-
-        name = str(action.get("block_name", "")).strip()
-        if not name:
-            return
-        try:
-            result = await generate_topic_payload(
-                topic_name=name,
-                category=str(action.get("category", "")).strip() or "general",
-                description=str(action.get("description", "")).strip(),
-                inputs=action.get("inputs") or [],
-                outputs=action.get("outputs") or [],
-            )
-            params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
-            output_ports = params.get("output_ports") or []
-            if not output_ports:
-                return  # nothing grounded — leave action as-is (client makes a stub)
-            action["output_ports"] = output_ports
-            if params.get("input_ports"):
-                action["input_ports"] = params["input_ports"]
-            log.info(
-                "create_topic_grounding_ok",
-                session_id=self._session_id,
-                block=name,
-                ports=len(output_ports),
-            )
-        except Exception as exc:
-            log.warning(
-                "create_topic_grounding_failed",
-                session_id=self._session_id,
-                block=name,
-                error=str(exc),
-            )
-
-    async def _enrich_code_block(self, action: dict[str, Any]) -> None:
-        """Fill a newly created code block's ports with AI-generated source code.
-
-        Reuses the same generator (the [create_code] prompt) the manual UnifiedWindow path
-        calls, producing code in the requested ``language``, then attaches the generated
-        input/output ports onto the action so the client writes a populated block instead of
-        an empty stub. Best-effort: any failure leaves the action unchanged.
-        """
-        from app.modules.blocks.router import generate_code_payload
-
-        name = str(action.get("block_name", "")).strip()
-        description = str(action.get("description", "")).strip()
-        if not name or not description:
-            return
-        try:
-            result = await generate_code_payload(
-                block_name=name,
-                category=str(action.get("category", "")).strip() or "general",
-                description=description,
-                language=str(action.get("language", "")).strip() or "python",
-                inputs=action.get("inputs") or [],
-                outputs=action.get("outputs") or [],
-            )
-            params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
-            output_ports = params.get("output_ports") or []
-            if not output_ports:
-                return  # nothing generated — leave action as-is (client makes a stub)
-            action["output_ports"] = output_ports
-            if params.get("input_ports"):
-                action["input_ports"] = params["input_ports"]
-            log.info(
-                "create_code_codegen_ok",
-                session_id=self._session_id,
-                block=name,
-                language=str(action.get("language", "")).strip() or "python",
-            )
-        except Exception as exc:
-            log.warning(
-                "create_code_codegen_failed",
-                session_id=self._session_id,
-                block=name,
-                error=str(exc),
-            )
 
     async def _resolve_read_tool(self, args: dict[str, Any]) -> str:
         """Resolve a read_port_value tool call into a text result for the model."""
@@ -843,9 +553,12 @@ class _OrchestratorSession:
                                     )
 
                                     responses = build_tool_function_responses(other_calls)
-                                    for fc in read_calls:
-                                        responses.append(
-                                            await self._build_read_response(fc)
+                                    if read_calls:
+                                        # Resolve concurrent reads in parallel, not serially.
+                                        responses.extend(
+                                            await asyncio.gather(
+                                                *(self._build_read_response(fc) for fc in read_calls)
+                                            )
                                         )
 
                                     try:
@@ -898,7 +611,7 @@ class _OrchestratorSession:
                                         turn_transcript,
                                         self._session_id,
                                     )
-                                await self._enrich_tool_actions(actions)
+                                await enrich_actions(actions, self._session_id)
                                 if display_text or actions:
                                     await _send(self._ws, {
                                         "type": "turn_complete",
@@ -920,8 +633,15 @@ class _OrchestratorSession:
                     """
                     while self._voice_active:
                         await self._canvas_dirty.wait()
-                        self._canvas_dirty.clear()
-                        await asyncio.sleep(1.5)  # coalesce 400ms update bursts / edits
+                        # Debounce: keep resetting the 1.5s timer while edits keep
+                        # arriving, so a burst re-seeds Gemini once it settles —
+                        # not once per edit.
+                        while self._voice_active:
+                            self._canvas_dirty.clear()
+                            try:
+                                await asyncio.wait_for(self._canvas_dirty.wait(), timeout=1.5)
+                            except asyncio.TimeoutError:
+                                break  # 1.5s of quiet → process the latest canvas state
                         if not self._voice_active:
                             return
                         new_ctx = self._build_diagram_context(budget=9000, lib_limit=30)

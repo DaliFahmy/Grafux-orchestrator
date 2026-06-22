@@ -113,8 +113,8 @@ async def verify_jwt(token: str) -> dict | None:
     if cached:
         try:
             return json.loads(cached)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("jwt_cache_decode_failed", error=str(exc))  # corrupt entry → re-verify
 
     # Verify the JWT directly — no backend roundtrip
     try:
@@ -129,11 +129,11 @@ async def verify_jwt(token: str) -> dict | None:
         "valid": True,
     }
 
-    # Cache the result
+    # Cache the result (best-effort — auth still succeeds if the cache write fails)
     try:
         await redis.setex(cache_key, settings.auth_cache_ttl, json.dumps(result))
-    except Exception:
-        pass
+    except Exception as exc:
+        log.debug("jwt_cache_write_failed", error=str(exc))
 
     return result
 

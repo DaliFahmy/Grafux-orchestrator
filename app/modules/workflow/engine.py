@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import operator
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 from typing import Annotated, Any, TypedDict
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
 from app.config import get_settings
+from app.core.constants import route_tool_to_node
 from app.core.logging import get_logger
 from app.modules.streaming.event_bus import emit, emit_agent_thought, emit_log, emit_step
 from app.shared import events as ev
@@ -42,6 +45,24 @@ async def _check_cancelled(execution_id: str) -> bool:
     return bool(await redis.exists(f"cancel:{execution_id}"))
 
 
+def cancellable_node(
+    fn: Callable[[ExecutionState], Awaitable[dict[str, Any]]],
+) -> Callable[[ExecutionState], Awaitable[dict[str, Any]]]:
+    """Short-circuit a tool node when the execution's cancel flag is set.
+
+    DRYs the identical guard every tool node opened with. The agent node keeps its
+    own check because it returns a distinct error message on cancellation.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(state: ExecutionState) -> dict[str, Any]:
+        if await _check_cancelled(state["execution_id"]):
+            return {"cancelled": True}
+        return await fn(state)
+
+    return wrapper
+
+
 async def agent_node(state: ExecutionState) -> dict[str, Any]:
     """Core AI agent node — calls LLM and returns updated messages."""
     execution_id = state["execution_id"]
@@ -50,22 +71,18 @@ async def agent_node(state: ExecutionState) -> dict[str, Any]:
         return {"cancelled": True, "error": "Execution cancelled by user"}
 
     settings = get_settings()
-    if not settings.openai_api_key:
-        error = "OpenAI API key not configured"
+    if not settings.openai_api_key and not settings.anthropic_api_key:
+        error = "No LLM API key configured"
         await emit_log(execution_id, error, level="error")
         return {"error": error}
 
-    from langchain_openai import ChatOpenAI
+    from app.core.llm import make_chat_model
     from langchain_core.tools import tool as lc_tool
 
     await emit_log(execution_id, "Agent node: calling LLM", level="info", node="agent")
     await emit_agent_thought(execution_id, "agent", "Thinking...")
 
-    llm = ChatOpenAI(
-        model=settings.openai_model,
-        api_key=settings.openai_api_key,
-        streaming=False,
-    )
+    llm = make_chat_model(state["metadata"].get("llm_model"), streaming=False)
 
     # Bind tools if the workflow metadata defines them
     tool_definitions = state["metadata"].get("tools", [])
@@ -85,12 +102,10 @@ async def agent_node(state: ExecutionState) -> dict[str, Any]:
         return {"error": error}
 
 
+@cancellable_node
 async def mcp_node(state: ExecutionState) -> dict[str, Any]:
     """MCP tool invocation node."""
     execution_id = state["execution_id"]
-    if await _check_cancelled(execution_id):
-        return {"cancelled": True}
-
     last_message = state["messages"][-1] if state["messages"] else None
     if not last_message or not hasattr(last_message, "tool_calls") or not last_message.tool_calls:
         return {}
@@ -130,12 +145,10 @@ async def mcp_node(state: ExecutionState) -> dict[str, Any]:
     return {"messages": tool_messages}
 
 
+@cancellable_node
 async def research_node(state: ExecutionState) -> dict[str, Any]:
     """Internet research node — Tavily + Firecrawl pipeline."""
     execution_id = state["execution_id"]
-    if await _check_cancelled(execution_id):
-        return {"cancelled": True}
-
     metadata = state["metadata"]
     query = metadata.get("research_query") or _extract_last_user_query(state["messages"])
     if not query:
@@ -160,12 +173,10 @@ async def research_node(state: ExecutionState) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@cancellable_node
 async def sandbox_node(state: ExecutionState) -> dict[str, Any]:
     """Code execution node — runs code in an E2B sandbox."""
     execution_id = state["execution_id"]
-    if await _check_cancelled(execution_id):
-        return {"cancelled": True}
-
     code = state["metadata"].get("code_to_execute") or _extract_code_from_messages(state["messages"])
     if not code:
         return {}
@@ -192,12 +203,10 @@ async def sandbox_node(state: ExecutionState) -> dict[str, Any]:
         return {"error": str(exc)}
 
 
+@cancellable_node
 async def device_node(state: ExecutionState) -> dict[str, Any]:
     """Device command node — dispatches commands to Grafux-devices."""
     execution_id = state["execution_id"]
-    if await _check_cancelled(execution_id):
-        return {"cancelled": True}
-
     metadata = state["metadata"]
     device_id = metadata.get("device_id")
     command = metadata.get("device_command")
@@ -246,17 +255,7 @@ def should_continue(state: ExecutionState) -> str:
         return END
 
     tool_name = last_message.tool_calls[0]["name"] if last_message.tool_calls else ""
-
-    if tool_name.startswith("mcp_") or tool_name.startswith("grafux_"):
-        return "mcp"
-    elif tool_name.startswith("research_") or tool_name == "web_search":
-        return "research"
-    elif tool_name.startswith("sandbox_") or tool_name == "execute_code":
-        return "sandbox"
-    elif tool_name.startswith("device_"):
-        return "device"
-    else:
-        return "mcp"  # default tool router
+    return route_tool_to_node(tool_name)
 
 
 # ── WorkflowEngine ────────────────────────────────────────────────────────────

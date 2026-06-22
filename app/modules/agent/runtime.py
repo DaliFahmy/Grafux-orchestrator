@@ -27,10 +27,10 @@ class AgentRuntime:
         org_id: str,
     ) -> dict[str, Any]:
         settings = get_settings()
-        if not settings.openai_api_key:
-            return {"error": "OpenAI API key not configured", "output": ""}
+        if not settings.openai_api_key and not settings.anthropic_api_key:
+            return {"error": "No LLM API key configured", "output": ""}
 
-        from langchain_openai import ChatOpenAI
+        from app.core.llm import make_chat_model
         # langgraph-prebuilt is a required dep of langgraph>=1.0.0
         from langgraph.prebuilt import create_react_agent
 
@@ -55,10 +55,7 @@ class AgentRuntime:
         # Build tools
         tools = self._build_tools(config.tools, execution_id, org_id)
 
-        llm = ChatOpenAI(
-            model=config.model or settings.openai_model,
-            api_key=settings.openai_api_key,
-        )
+        llm = make_chat_model(config.model)
 
         agent = create_react_agent(llm, tools)
 

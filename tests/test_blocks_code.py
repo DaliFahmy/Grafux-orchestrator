@@ -16,14 +16,20 @@ def _fake_settings(key: str = "sk-test"):
 async def test_generate_code_payload_uses_language_and_fills_code_port(monkeypatch):
     captured = {}
 
-    async def fake_call_openai_text(system_prompt, user_message, temperature=0.2):
+    async def fake_call_openai_json(system_prompt, user_message, temperature=0.3):
         captured["system_prompt"] = system_prompt
         captured["user_message"] = user_message
-        # Model may wrap output in fences; payload must strip them.
-        return "```rust\nfn main() { println!(\"hi\"); }\n```"
+        # Model may wrap the code value in fences; payload must strip them.
+        return {
+            "code": "```rust\nfn main() { println!(\"hi\"); }\n```",
+            "explanation": "Prints hi.",
+            "improvements": "- add args",
+            "dependencies": "None",
+            "language": "rust",
+        }
 
     monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
-    monkeypatch.setattr(blocks_router, "_call_openai_text", fake_call_openai_text)
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_call_openai_json)
 
     result = await blocks_router.generate_code_payload(
         block_name="reverse_string",
@@ -39,11 +45,14 @@ async def test_generate_code_payload_uses_language_and_fills_code_port(monkeypat
     assert params["block_type"] == "code"
 
     ports = {p["port_name"]: p["port_content"] for p in params["output_ports"]}
-    assert set(ports) >= {"code", "status", "errors", "warnings"}
+    assert set(ports) == {"code", "explanation", "improvements", "dependencies", "language"}
+    assert "status" not in ports and "errors" not in ports and "warnings" not in ports
     # Fences stripped, real code present.
     assert ports["code"] == 'fn main() { println!("hi"); }'
     assert "```" not in ports["code"]
-    assert ports["status"] == "generated"
+    assert ports["explanation"] == "Prints hi."
+    assert ports["dependencies"] == "None"
+    assert ports["language"] == "rust"
 
     inputs = {p["port_name"]: p["port_content"] for p in params["input_ports"]}
     assert inputs["language"] == "rust"
@@ -69,5 +78,6 @@ def test_simple_code_response_shape():
     assert params["block_type"] == "code"
     inputs = {p["port_name"]: p["port_content"] for p in params["input_ports"]}
     assert inputs["language"] == "go"
-    out_names = {p["port_name"] for p in params["output_ports"]}
-    assert out_names == {"code", "status", "errors", "warnings"}
+    out = {p["port_name"]: p["port_content"] for p in params["output_ports"]}
+    assert set(out) == {"code", "explanation", "improvements", "dependencies", "language"}
+    assert out["language"] == "go"

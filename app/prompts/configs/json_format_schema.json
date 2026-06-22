@@ -76,7 +76,7 @@
             "_comment_output": "Output ports produce data. Each port needs 3 fields.",
             
             "port_name": "output_result",
-            "_comment_port_name": "Descriptive name in snake_case. Examples: 'results', 'description', 'Paris', 'prepared_materials'",
+            "_comment_port_name": "Descriptive name in snake_case. Examples: 'block_results', 'block_description', 'Paris', 'prepared_materials'",
             
             "port_content": "Detailed description or content extracted from analysis",
             "_comment_port_content": "For OUTPUT ports: provide detailed, useful content. This is the actual data produced.",
@@ -177,15 +177,15 @@
     "rule_14_tags": "Optional params.tags: string array for categorization (e.g. ['travel', 'europe']). Omit the field entirely if irrelevant. Values must be lowercase snake_case.",
 
     "_block_type_specifics": {
-      "topics": "block_id: 100+, path: topics/{category}/{name}. REQUIRED input ports: [description]. REQUIRED output ports: one per entity (port_name = entity name in snake_case, port_content = description of entity). Do NOT add a sibling key named 'topics' on the tool call object.",
-      "components": "block_id: 200+, path: components/{group}/{name}. REQUIRED input ports: description, connection, example_projects, integration. REQUIRED output ports (all 12): description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration.",
-      "commands": "block_id: 301+, path: commands/{package}/{name}. REQUIRED input ports: description, plus one port per command parameter. REQUIRED output ports: description, result.",
-      "procedures": "block_id: 401+, path: procedures/{procedureName}/{stepName} (NO category — has procedure and step levels). Step naming: step_{number}_{descriptive_name}. REQUIRED input ports: sequence, dependencies. REQUIRED output ports: sequence, description, difficulty, dependencies, requirement, duration. x spacing: 500px between steps.",
-      "tools": "block_id: 501+, path: tools/{category}/{name}. REQUIRED input ports: description (reserved, always first), any task-specific inputs, code (reserved, always last). REQUIRED output ports: always include ALL of results, errors, warnings, code, status, description, change, improvements — append them after any task-specific outputs. Never omit any of these 8 standard output ports.",
-      "devices": "block_id: 601+, path: devices/{category}/{name}. FIXED input ports (exactly these 5, no more, no less): description, device_id, command, text, file. FIXED output ports (exactly these 8, no more, no less): results, response, status, errors, terminal, file, warnings, improvements.",
-      "memory": "block_id: 701+, path: memory/{name}. REQUIRED param: memory_mode set to either 'snapshot' or 'sequential'. snapshot mode — REQUIRED input ports: description, input; output ports: [] (empty, populated dynamically at runtime). sequential mode — REQUIRED input ports: description plus at least one user-defined data port; REQUIRED output ports: output.",
-      "selection": "block_id: 751+, path: selection/{name}. REQUIRED input ports: description, criteria, plus at least one candidate input port representing items to choose from. REQUIRED output ports: selected, analysis.",
-      "filter": "block_id: 801+, path: filter/{name}. REQUIRED param: filter_type set to one of: text, picture, video. FIXED input ports (exactly these 4): description, code, criteria, input. FIXED output ports (exactly these 6): filtered, analysis, errors, warnings, improvements, code. The input 'code' port stores editable Python used by Run; the output 'code' port mirrors generated/regenerated/used code."
+      "topics": "block_id: 100+, path: topics/{category}/{name}. REQUIRED input ports: [block_description]. REQUIRED output ports: one per entity (port_name = entity name in snake_case, port_content = description of entity). Do NOT add a sibling key named 'topics' on the tool call object.",
+      "components": "block_id: 200+, path: components/{group}/{name}. REQUIRED input ports: block_description, connection, example_projects, integration. REQUIRED output ports (all 12): block_description, requirements, tutorials, type, manufacturer, datasheet, schematics, example_projects, price, location, connection, integration.",
+      "commands": "block_id: 301+, path: commands/{package}/{name}. REQUIRED input ports: block_description, plus one port per command parameter. REQUIRED output ports: block_description, result.",
+      "procedures": "block_id: 401+, path: procedures/{procedureName}/{stepName} (NO category — has procedure and step levels). Step naming: step_{number}_{descriptive_name}. REQUIRED input ports: sequence, dependencies. REQUIRED output ports: sequence, block_description, difficulty, dependencies, requirement, duration. x spacing: 500px between steps.",
+      "tools": "block_id: 501+, path: tools/{category}/{name}. REQUIRED input ports: block_description (reserved, always first), any task-specific inputs, code (reserved, always last). REQUIRED output ports: always include ALL of block_results, errors, warnings, code, status, block_description, change, improvements — append them after any task-specific outputs. Never omit any of these 8 standard output ports.",
+      "devices": "block_id: 601+, path: devices/{category}/{name}. FIXED input ports (exactly these 5, no more, no less): block_description, device_id, command, text, file. FIXED output ports (exactly these 8, no more, no less): block_results, response, status, errors, terminal, file, warnings, improvements.",
+      "memory": "block_id: 701+, path: memory/{name}. REQUIRED param: memory_mode set to either 'snapshot' or 'sequential'. snapshot mode — REQUIRED input ports: block_description, input; output ports: [] (empty, populated dynamically at runtime). sequential mode — REQUIRED input ports: block_description plus at least one user-defined data port; REQUIRED output ports: output.",
+      "selection": "block_id: 751+, path: selection/{name}. REQUIRED input ports: block_description, criteria, plus at least one candidate input port representing items to choose from. REQUIRED output ports: selected, analysis.",
+      "filter": "block_id: 801+, path: filter/{name}. REQUIRED param: filter_type set to one of: text, picture, video. FIXED input ports (exactly these 4): block_description, code, criteria, input. FIXED output ports (exactly these 6): filtered, analysis, errors, warnings, improvements, code. The input 'code' port stores editable Python used by Run; the output 'code' port mirrors generated/regenerated/used code."
     }
   }
 }
