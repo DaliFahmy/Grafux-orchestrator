@@ -162,10 +162,14 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
         "create_block",
         "Create a new saved block (only after user confirmation).",
         {
-            "block_type": _str_prop("Block type: tools, topics, commands, etc."),
+            "block_type": _str_prop("Block type: tools, topics, commands, code, etc."),
             "block_name": _str_prop("New block name (snake_case)."),
             "description": _str_prop("What the block does."),
             "category": _str_prop("Optional category folder for category-based types."),
+            "language": _str_prop(
+                "For a 'code' block: the programming language to generate code in "
+                "(e.g. python, javascript, go, rust, c++). Ignored for other block types."
+            ),
             "inputs": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -242,7 +246,7 @@ def function_call_to_action(
                 action[key] = str(args[key]).strip()
 
     elif name == "create_block":
-        for key in ("block_type", "block_name", "description", "category"):
+        for key in ("block_type", "block_name", "description", "category", "language"):
             if key in args and args[key] is not None:
                 action[key] = args[key]
         if "inputs" in args:

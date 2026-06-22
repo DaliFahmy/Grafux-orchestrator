@@ -16,6 +16,15 @@ class TopicGenerateRequest(BaseModel):
     ground: bool | None = None
 
 
+class CodeGenerateRequest(BaseModel):
+    block_name: str
+    category: str = "general"
+    description: str = ""
+    language: str = "python"
+    inputs: List[str] = []
+    outputs: List[str] = []
+
+
 class RunSearchRequest(BaseModel):
     block_name: str
     block_type: str  # "topics", "components", "procedures"

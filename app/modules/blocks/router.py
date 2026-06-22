@@ -11,6 +11,7 @@ from app.core.logging import get_logger
 from app.dependencies import CurrentUser
 from app.modules.blocks.schemas import (
     TopicGenerateRequest,
+    CodeGenerateRequest,
     RunSearchRequest,
     RunSelectionRequest,
     RunFilterRequest,
@@ -28,6 +29,7 @@ _BLOCK_TYPE_SECTION: dict[str, str] = {
     "commands": "create_cmd",
     "tools": "create_tool",
     "procedures": "create_procedure",
+    "code": "create_code",
 }
 
 router = APIRouter(prefix="/blocks", tags=["blocks"])
@@ -372,6 +374,203 @@ async def generate_tool_code(user_message: str, *, temperature: float = 0.2) -> 
         raise ValueError("create_tool prompt section missing from Msg_config")
     raw = await _call_openai_text(system_prompt, user_message, temperature=temperature)
     return _strip_code_fences(raw)
+
+
+def _code_port_path(category: str, name: str, port_type: str, port_name: str) -> str:
+    return f"data/code/{category}/{name}/{port_type}/{port_name}.txt"
+
+
+def build_code_gen_message(
+    *,
+    block_name: str,
+    description: str,
+    language: str,
+    outputs: list[str] | None = None,
+) -> str:
+    """Assemble the user message the [create_code] prompt expects.
+
+    Supplies the block name, the target programming LANGUAGE, the requested output ports,
+    and the requirement text so the model generates a complete program in that language.
+    """
+    outputs = [p for p in (outputs or []) if p]
+    parts = [
+        f"Block name: {block_name}",
+        f"Programming language: {language or 'python'}",
+        f"Output ports: {', '.join(outputs) if outputs else '(none)'}",
+        f"Requirement (what the code should do):\n{description.strip()}",
+    ]
+    return "\n\n".join(parts)
+
+
+async def generate_code_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    language: str = "python",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+) -> dict | None:
+    """Generate a code block envelope (the `tool_calls` dict) via AI.
+
+    Mirrors :func:`generate_topic_payload` but produces source code in the requested
+    ``language`` instead of researched entities: it calls OpenAI with the [create_code]
+    prompt as raw text (NOT JSON mode — code is plain text), strips any markdown fences, and
+    returns a ``{tool_calls, ...}`` envelope whose ``code`` output port holds the generated
+    source. No web grounding — code generation must not be polluted with live search results.
+
+    Returns ``None`` when OpenAI is not configured or generation fails, so callers can fall
+    back (the REST endpoint to an empty-port stub, the stream path to leaving the action as-is).
+    """
+    settings = get_settings()
+    if not settings.openai_api_key:
+        return None
+
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+    lang = (language or "python").strip()
+
+    system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["code"])
+    if not system_prompt:
+        raise ValueError("create_code prompt section missing from Msg_config")
+
+    user_message = build_code_gen_message(
+        block_name=name,
+        description=description,
+        language=lang,
+        outputs=outputs,
+    )
+
+    code = _strip_code_fences(await _call_openai_text(system_prompt, user_message, temperature=0.2))
+
+    op = [
+        {
+            "port_name": "code",
+            "port_content": code,
+            "port_path": _code_port_path(cat, name, "outputs", "code"),
+        },
+        {
+            "port_name": "status",
+            "port_content": "generated",
+            "port_path": _code_port_path(cat, name, "outputs", "status"),
+        },
+        {
+            "port_name": "errors",
+            "port_content": "",
+            "port_path": _code_port_path(cat, name, "outputs", "errors"),
+        },
+        {
+            "port_name": "warnings",
+            "port_content": "",
+            "port_path": _code_port_path(cat, name, "outputs", "warnings"),
+        },
+    ]
+    ip = [
+        {
+            "port_name": "description",
+            "port_content": description,
+            "port_path": _code_port_path(cat, name, "inputs", "description"),
+        },
+        {
+            "port_name": "language",
+            "port_content": lang,
+            "port_path": _code_port_path(cat, name, "inputs", "language"),
+        },
+    ]
+    for inp in inputs or []:
+        if inp and inp not in ("description", "language"):
+            ip.append({
+                "port_name": inp,
+                "port_content": "",
+                "port_path": _code_port_path(cat, name, "inputs", inp),
+            })
+
+    return {
+        "tool_calls": [
+            {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "block_id": uuid.uuid4().hex[:8],
+                    "block_type": "code",
+                    "x": 0,
+                    "y": 0,
+                    "input_ports": ip,
+                    "output_ports": op,
+                },
+            }
+        ],
+        "connections": [],
+    }
+
+
+def _simple_code_response(body: CodeGenerateRequest) -> dict:
+    """Fallback: build a minimal code block without AI when OpenAI is not configured."""
+    name = body.block_name.replace(" ", "_")
+    cat = body.category or "general"
+    lang = (body.language or "python").strip()
+    return {
+        "tool_calls": [
+            {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "block_id": uuid.uuid4().hex[:8],
+                    "block_type": "code",
+                    "x": 0,
+                    "y": 0,
+                    "input_ports": [
+                        {"port_name": "description", "port_content": body.description,
+                         "port_path": _code_port_path(cat, name, "inputs", "description")},
+                        {"port_name": "language", "port_content": lang,
+                         "port_path": _code_port_path(cat, name, "inputs", "language")},
+                    ],
+                    "output_ports": [
+                        {"port_name": pn, "port_content": "",
+                         "port_path": _code_port_path(cat, name, "outputs", pn)}
+                        for pn in ("code", "status", "errors", "warnings")
+                    ],
+                },
+            }
+        ],
+        "connections": [],
+    }
+
+
+@router.post("/generate/code")
+async def generate_code_block(
+    body: CodeGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Generate a code block (source code in the chosen language) using AI, with fallback.
+
+    Serves both the manual UnifiedWindow creation path and the app's Run/Regenerate buttons.
+    Falls back to an empty-port stub when OpenAI is unconfigured or generation fails.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key:
+        log.info("blocks_generate_code_fallback", reason="no_openai_key", block=body.block_name)
+        return _simple_code_response(body)
+    try:
+        result = await generate_code_payload(
+            block_name=body.block_name,
+            category=body.category,
+            description=body.description,
+            language=body.language,
+            inputs=body.inputs,
+            outputs=body.outputs,
+        )
+        if result is None:
+            return _simple_code_response(body)
+        log.info("blocks_generate_code_ok", block=body.block_name, language=body.language)
+        return result
+    except Exception as exc:
+        log.error("blocks_generate_code_error", block=body.block_name, error=str(exc))
+        return _simple_code_response(body)
 
 
 @router.post("/run/search")

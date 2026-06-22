@@ -535,6 +535,8 @@ class _OrchestratorSession:
                 await self._enrich_tool_block(action)
             elif block_type == "topics":
                 await self._enrich_topic_block(action)
+            elif block_type == "code":
+                await self._enrich_code_block(action)
 
     async def _enrich_tool_block(self, action: dict[str, Any]) -> None:
         """Attach @register_tool-formatted Python to a newly created tool block."""
@@ -603,6 +605,50 @@ class _OrchestratorSession:
         except Exception as exc:
             log.warning(
                 "create_topic_grounding_failed",
+                session_id=self._session_id,
+                block=name,
+                error=str(exc),
+            )
+
+    async def _enrich_code_block(self, action: dict[str, Any]) -> None:
+        """Fill a newly created code block's ports with AI-generated source code.
+
+        Reuses the same generator (the [create_code] prompt) the manual UnifiedWindow path
+        calls, producing code in the requested ``language``, then attaches the generated
+        input/output ports onto the action so the client writes a populated block instead of
+        an empty stub. Best-effort: any failure leaves the action unchanged.
+        """
+        from app.modules.blocks.router import generate_code_payload
+
+        name = str(action.get("block_name", "")).strip()
+        description = str(action.get("description", "")).strip()
+        if not name or not description:
+            return
+        try:
+            result = await generate_code_payload(
+                block_name=name,
+                category=str(action.get("category", "")).strip() or "general",
+                description=description,
+                language=str(action.get("language", "")).strip() or "python",
+                inputs=action.get("inputs") or [],
+                outputs=action.get("outputs") or [],
+            )
+            params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+            output_ports = params.get("output_ports") or []
+            if not output_ports:
+                return  # nothing generated — leave action as-is (client makes a stub)
+            action["output_ports"] = output_ports
+            if params.get("input_ports"):
+                action["input_ports"] = params["input_ports"]
+            log.info(
+                "create_code_codegen_ok",
+                session_id=self._session_id,
+                block=name,
+                language=str(action.get("language", "")).strip() or "python",
+            )
+        except Exception as exc:
+            log.warning(
+                "create_code_codegen_failed",
                 session_id=self._session_id,
                 block=name,
                 error=str(exc),
