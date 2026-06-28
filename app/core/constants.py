@@ -19,6 +19,7 @@ class BlockType(str, Enum):
     TOOLS = "tools"
     PROCEDURES = "procedures"
     CODE = "code"
+    IMAGE = "image"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -29,6 +30,7 @@ BLOCK_TYPE_SECTION: dict[str, str] = {
     BlockType.TOOLS.value: "create_tool",
     BlockType.PROCEDURES.value: "create_procedure",
     BlockType.CODE.value: "create_code",
+    BlockType.IMAGE.value: "create_image",
 }
 
 # Search-block types whose Run/Regenerate output is grounded in live web data.

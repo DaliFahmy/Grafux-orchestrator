@@ -162,7 +162,7 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
         "create_block",
         "Create a new saved block (only after user confirmation).",
         {
-            "block_type": _str_prop("Block type: tools, topics, commands, code, etc."),
+            "block_type": _str_prop("Block type: tools, topics, commands, code, image, etc."),
             "block_name": _str_prop("New block name (snake_case)."),
             "description": _str_prop("What the block does."),
             "category": _str_prop("Optional category folder for category-based types."),

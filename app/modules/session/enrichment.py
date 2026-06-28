@@ -134,9 +134,43 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> None:
         )
 
 
+async def _enrich_image_block(action: dict[str, Any], session_id: str) -> None:
+    """Lay out a newly created image block's standard ports.
+
+    The image itself is produced at Run by the image service, so enrichment only
+    scaffolds the input ports (prompt/modification/search_for) and output ports
+    (image/image_name/image_description/improvements) — matching the manual
+    UnifiedWindow path so voice/text-created image blocks have the right shape.
+    """
+    from app.modules.blocks.router import generate_image_payload
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return
+    try:
+        result = await generate_image_payload(
+            block_name=name,
+            category=str(action.get("category", "")).strip() or "general",
+            description=str(action.get("description", "")).strip(),
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+        )
+        params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+        if params.get("output_ports"):
+            action["output_ports"] = params["output_ports"]
+        if params.get("input_ports"):
+            action["input_ports"] = params["input_ports"]
+        log.info("create_image_scaffold_ok", session_id=session_id, block=name)
+    except Exception as exc:
+        log.warning(
+            "create_image_scaffold_failed", session_id=session_id, block=name, error=str(exc)
+        )
+
+
 # block_type → enricher. Replaces the if/elif dispatch chain.
 _ENRICHERS = {
     "tools": _enrich_tool_block,
     "topics": _enrich_topic_block,
     "code": _enrich_code_block,
+    "image": _enrich_image_block,
 }

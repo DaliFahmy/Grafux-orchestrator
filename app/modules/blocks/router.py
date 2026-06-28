@@ -18,6 +18,7 @@ from app.core.logging import get_logger
 from app.dependencies import CurrentUser
 from app.modules.blocks.schemas import (
     CodeGenerateRequest,
+    ImageGenerateRequest,
     RegenerateFilterRequest,
     RegenerateToolRequest,
     RunFilterRequest,
@@ -556,6 +557,108 @@ async def generate_code_block(
     except Exception as exc:
         log.error("blocks_generate_code_error", block=body.block_name, error=str(exc))
         return _simple_code_response(body)
+
+
+def _image_port_path(category: str, name: str, port_type: str, port_name: str) -> str:
+    return f"data/image/{category}/{name}/{port_type}/{port_name}.txt"
+
+
+# Standard image-block ports. The image bytes are produced later by the image
+# service on Run (see Grafux-interaction/image); creation only scaffolds the
+# ports so the block has the right input/output shape to wire connections to.
+_IMAGE_INPUT_PORTS = ("prompt", "modification", "search_for")
+_IMAGE_OUTPUT_PORTS = ("image", "image_name", "image_description", "improvements", "status")
+
+
+async def generate_image_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+) -> dict | None:
+    """Build an image block envelope (the ``tool_calls`` dict) — port scaffold only.
+
+    Unlike the topic/code generators, this makes no AI call and never needs an API
+    key: the image block produces its picture at *Run* time by calling the image
+    service (``Grafux-interaction/image``), so creation just lays out the standard
+    input ports (``block_description`` + prompt/modification/search_for) and output
+    ports (``image``/``image_name``/``image_description``/``improvements``). Any
+    extra requested ports are appended. Returns the ``{tool_calls, ...}`` envelope.
+    """
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+
+    ip = [
+        {
+            "port_name": "block_description",
+            "port_content": description,
+            "port_path": _image_port_path(cat, name, "inputs", "block_description"),
+        }
+    ]
+    seen_in = {"block_description"}
+    for inp in list(_IMAGE_INPUT_PORTS) + list(inputs or []):
+        if inp and inp not in seen_in and inp not in ("description",):
+            seen_in.add(inp)
+            ip.append({
+                "port_name": inp,
+                "port_content": "",
+                "port_path": _image_port_path(cat, name, "inputs", inp),
+            })
+
+    op = []
+    seen_out: set[str] = set()
+    for out in list(_IMAGE_OUTPUT_PORTS) + list(outputs or []):
+        if out and out not in seen_out:
+            seen_out.add(out)
+            op.append({
+                "port_name": out,
+                "port_content": "",
+                "port_path": _image_port_path(cat, name, "outputs", out),
+            })
+
+    return {
+        "tool_calls": [
+            {
+                "id": 1,
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "block_id": uuid.uuid4().hex[:8],
+                    "block_type": "image",
+                    "x": 0,
+                    "y": 0,
+                    "input_ports": ip,
+                    "output_ports": op,
+                },
+            }
+        ],
+        "connections": [],
+    }
+
+
+@router.post("/generate/image")
+async def generate_image_block(
+    body: ImageGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Create an image block's port scaffold (image/image_name/description/improvements).
+
+    Serves both the manual UnifiedWindow creation path and voice/text creation. The
+    actual image is produced at Run by the image service, so this only lays out the
+    ports — it always succeeds and needs no API key.
+    """
+    result = await generate_image_payload(
+        block_name=body.block_name,
+        category=body.category,
+        description=body.description,
+        inputs=body.inputs,
+        outputs=body.outputs,
+    )
+    log.info("blocks_generate_image_ok", block=body.block_name)
+    return result
 
 
 @router.post("/run/search")

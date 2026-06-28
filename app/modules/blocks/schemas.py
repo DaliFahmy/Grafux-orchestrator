@@ -27,6 +27,14 @@ class CodeGenerateRequest(BaseModel):
     outputs: list[str] = []
 
 
+class ImageGenerateRequest(BaseModel):
+    block_name: str
+    category: str = "general"
+    description: str = ""
+    inputs: list[str] = []
+    outputs: list[str] = []
+
+
 class RunSearchRequest(BaseModel):
     block_name: str
     block_type: str  # "topics", "components", "procedures"
