@@ -24,7 +24,10 @@ from app.modules.session.canvas_context import (
 from app.modules.session.canvas_context import (
     render_port as _render_port,  # noqa: F401 — re-exported for tests
 )
-from app.modules.session.enrichment import enrich_actions
+from app.modules.session.enrichment import (
+    enrich_actions_streaming,
+    is_enrichable,
+)
 
 log = get_logger("session.router")
 
@@ -117,6 +120,10 @@ class _OrchestratorSession:
         # Pending on-demand port reads, keyed by request_id → future resolved
         # when the client replies with a "port_content" message.
         self._pending_reads: dict[str, asyncio.Future[dict[str, Any]]] = {}
+        # Background enrichment tasks (block content generated after turn_complete is
+        # sent, then streamed to the client as action_enriched). Tracked so they can be
+        # cancelled on cleanup/stop and don't outlive the session.
+        self._enrich_tasks: set[asyncio.Task] = set()
 
     async def run(self) -> None:
         while True:
@@ -136,6 +143,7 @@ class _OrchestratorSession:
                 await self._dispatch_text(raw_text)
 
     async def cleanup(self) -> None:
+        await self._cancel_enrichment()
         if self._voice_task and not self._voice_task.done():
             self._voice_active = False
             self._canvas_dirty.set()  # wake the refresh loop so it exits
@@ -144,6 +152,18 @@ class _OrchestratorSession:
             try:
                 await asyncio.wait_for(self._voice_task, timeout=3.0)
             except (TimeoutError, asyncio.CancelledError):
+                pass
+
+    async def _cancel_enrichment(self) -> None:
+        """Cancel any in-flight background enrichment tasks (best-effort, swallow errors)."""
+        tasks = list(self._enrich_tasks)
+        self._enrich_tasks.clear()
+        for task in tasks:
+            task.cancel()
+        for task in tasks:
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
                 pass
 
     # ── Message dispatch ──────────────────────────────────────────────────────
@@ -268,6 +288,56 @@ class _OrchestratorSession:
             )
         return "\n\n".join(parts) if parts else empty
 
+    # ── Action streaming / enrichment ─────────────────────────────────────────
+
+    # Keys an enricher may fill on an action; only these are forwarded as the patch.
+    _PATCH_KEYS = ("output_ports", "input_ports", "code", "language")
+
+    @staticmethod
+    def _stamp_actions(actions: list[Any]) -> None:
+        """Give every create_block action a stable id and mark the enrichable ones pending.
+
+        ``action_id`` is the primary key the client correlates the follow-up
+        ``action_enriched`` message against; ``pending`` tells the client to drop in a
+        placeholder block now and wait for the enriched ports/code.
+        """
+        for action in actions:
+            if not isinstance(action, dict) or action.get("type") != "create_block":
+                continue
+            action.setdefault("action_id", uuid.uuid4().hex[:8])
+            if is_enrichable(action):
+                action["pending"] = True
+
+    @classmethod
+    def _extract_patch(cls, action: dict[str, Any]) -> dict[str, Any]:
+        """The enricher-produced keys to ship to the client (omit anything not generated)."""
+        return {k: action[k] for k in cls._PATCH_KEYS if k in action}
+
+    def _spawn_enrichment(self, actions: list[Any]) -> None:
+        """Start background enrichment for a turn's actions without blocking the turn."""
+        if not any(is_enrichable(a) for a in actions):
+            return
+        task = asyncio.create_task(self._enrich_and_stream(actions))
+        self._enrich_tasks.add(task)
+        task.add_done_callback(self._enrich_tasks.discard)
+
+    async def _enrich_and_stream(self, actions: list[Any]) -> None:
+        """Enrich each action and push an ``action_enriched`` message as each one finishes."""
+        try:
+            async for action, status, detail in enrich_actions_streaming(actions, self._session_id):
+                await _send(self._ws, {
+                    "type": "action_enriched",
+                    "action_id": action.get("action_id"),
+                    "block_name": action.get("block_name"),
+                    "enrichment_status": "failed" if status == "failed" else "ok",
+                    "enrichment_error": detail if status == "failed" else "",
+                    "patch": self._extract_patch(action),
+                })
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # never let a background task crash silently
+            log.warning("enrich_stream_failed", session_id=self._session_id, error=str(exc))
+
     # ── Text / AI turn ────────────────────────────────────────────────────────
 
     async def _run_text_turn(self, text: str) -> None:
@@ -363,10 +433,13 @@ class _OrchestratorSession:
                     })
 
             display_text, actions = _parse_actions_tag(full_text, self._session_id)
-            await enrich_actions(actions, self._session_id)
-
+            # Stamp ids / mark pending, send the turn immediately, THEN enrich in the
+            # background — the client renders placeholder blocks now and fills them in
+            # via action_enriched instead of waiting on web grounding / codegen.
+            self._stamp_actions(actions)
             self._history.append({"role": "assistant", "content": display_text})
             await _send(self._ws, {"type": "turn_complete", "full_text": display_text, "actions": actions})
+            self._spawn_enrichment(actions)
 
         except Exception as exc:
             log.error("ai_turn_error", session_id=self._session_id, error=str(exc))
@@ -401,6 +474,22 @@ class _OrchestratorSession:
             args["target_block"] = _default_target_block(self._active_blocks)
         content = await self._resolve_read_tool(args)
         entry: dict[str, Any] = {"name": name, "response": {"content": content}}
+        if fc_id:
+            entry["id"] = fc_id
+        return entry
+
+    def _failed_read_response(self, fc: Any) -> dict[str, Any]:
+        """Graceful function_response for a read whose resolution raised.
+
+        Keeps the shape ``_build_read_response`` returns so Gemini still gets a reply
+        for the call (it errors out otherwise) without leaking the exception.
+        """
+        name = getattr(fc, "name", None) or (fc.get("name") if isinstance(fc, dict) else "")
+        fc_id = getattr(fc, "id", None) or (fc.get("id") if isinstance(fc, dict) else None)
+        entry: dict[str, Any] = {
+            "name": name,
+            "response": {"content": "Could not read the port (an internal error occurred)."},
+        }
         if fc_id:
             entry["id"] = fc_id
         return entry
@@ -443,10 +532,11 @@ class _OrchestratorSession:
         settings = get_settings()
 
         try:
-            from google import genai as google_genai
             from google.genai import types as genai_types
 
-            client = google_genai.Client(api_key=settings.gemini_api_key)
+            from app.core.llm import get_gemini_client
+
+            client = get_gemini_client(settings.gemini_api_key)
 
             # Build Grafux context message for context seeding. Port-file
             # contents are rendered readably (active blocks first) so the voice
@@ -563,11 +653,25 @@ class _OrchestratorSession:
                                     responses = build_tool_function_responses(other_calls)
                                     if read_calls:
                                         # Resolve concurrent reads in parallel, not serially.
-                                        responses.extend(
-                                            await asyncio.gather(
-                                                *(self._build_read_response(fc) for fc in read_calls)
-                                            )
+                                        # return_exceptions so one failed read can't cancel its
+                                        # siblings (and kill the relay) — failures degrade to a
+                                        # graceful "could not read" response instead.
+                                        read_results = await asyncio.gather(
+                                            *(self._build_read_response(fc) for fc in read_calls),
+                                            return_exceptions=True,
                                         )
+                                        for fc, res in zip(read_calls, read_results, strict=False):
+                                            if isinstance(res, BaseException):
+                                                log.warning(
+                                                    "voice_read_response_failed",
+                                                    session_id=self._session_id,
+                                                    error=str(res),
+                                                )
+                                                responses.append(
+                                                    self._failed_read_response(fc)
+                                                )
+                                            else:
+                                                responses.append(res)
 
                                     try:
                                         await gemini.send_tool_response(
@@ -619,13 +723,17 @@ class _OrchestratorSession:
                                         turn_transcript,
                                         self._session_id,
                                     )
-                                await enrich_actions(actions, self._session_id)
+                                # Send the turn immediately and enrich in the background so
+                                # gemini.receive() keeps flowing audio — blocking here on web
+                                # grounding (5-40s) used to stall the whole voice loop.
+                                self._stamp_actions(actions)
                                 if display_text or actions:
                                     await _send(self._ws, {
                                         "type": "turn_complete",
                                         "full_text": display_text,
                                         "actions": actions,
                                     })
+                                self._spawn_enrichment(actions)
                                 turn_transcript = ""
                                 turn_tool_actions = []
 
@@ -641,15 +749,15 @@ class _OrchestratorSession:
                     """
                     while self._voice_active:
                         await self._canvas_dirty.wait()
-                        # Debounce: keep resetting the 1.5s timer while edits keep
-                        # arriving, so a burst re-seeds Gemini once it settles —
-                        # not once per edit.
+                        # Debounce: keep resetting the timer while edits keep arriving, so a
+                        # burst re-seeds Gemini once it settles — not once per edit. 1.0s keeps
+                        # the assistant's view fresh without flooding the live session.
                         while self._voice_active:
                             self._canvas_dirty.clear()
                             try:
-                                await asyncio.wait_for(self._canvas_dirty.wait(), timeout=1.5)
+                                await asyncio.wait_for(self._canvas_dirty.wait(), timeout=1.0)
                             except TimeoutError:
-                                break  # 1.5s of quiet → process the latest canvas state
+                                break  # quiet period elapsed → process the latest canvas state
                         if not self._voice_active:
                             return
                         new_ctx = self._build_diagram_context(budget=9000, lib_limit=30)

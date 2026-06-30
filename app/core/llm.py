@@ -30,10 +30,33 @@ log = get_logger("core.llm")
 
 _DEFAULT_MAX_TOKENS = 4096
 
-# Shared AsyncOpenAI clients keyed by the running event loop. Like the HTTP client
-# pool, an SDK client binds to the loop it was created on, so the web process gets
-# one reused client while Celery's per-task loops each get their own.
+# Shared SDK clients keyed by the running event loop. Like the HTTP client pool, an
+# SDK client binds to the loop it was created on, so the web process gets one reused
+# client while Celery's per-task loops each get their own. One pool per provider.
 _openai_clients: dict[int, tuple[asyncio.AbstractEventLoop, Any]] = {}
+_anthropic_clients: dict[int, tuple[asyncio.AbstractEventLoop, Any]] = {}
+_gemini_clients: dict[int, tuple[asyncio.AbstractEventLoop, Any]] = {}
+
+
+def _pooled(
+    pool: dict[int, tuple[asyncio.AbstractEventLoop, Any]],
+    factory,
+) -> Any:
+    """Return a loop-bound SDK client from ``pool``, creating one via ``factory`` if needed.
+
+    Shared core of the per-provider getters: reuse the client bound to the running
+    loop, evicting entries whose loop has closed (Celery per-task loops).
+    """
+    loop = asyncio.get_running_loop()
+    entry = pool.get(id(loop))
+    if entry is not None and entry[0] is loop:
+        return entry[1]
+    for key, (cached_loop, _client) in list(pool.items()):
+        if cached_loop.is_closed():
+            pool.pop(key, None)
+    client = factory()
+    pool[id(loop)] = (loop, client)
+    return client
 
 
 def get_async_openai() -> Any:
@@ -48,16 +71,34 @@ def get_async_openai() -> Any:
         raise ValueError("OPENAI_API_KEY not configured")
     from openai import AsyncOpenAI
 
-    loop = asyncio.get_running_loop()
-    entry = _openai_clients.get(id(loop))
-    if entry is not None and entry[0] is loop:
-        return entry[1]
-    for key, (cached_loop, _client) in list(_openai_clients.items()):
-        if cached_loop.is_closed():
-            _openai_clients.pop(key, None)
-    client = AsyncOpenAI(api_key=settings.openai_api_key)
-    _openai_clients[id(loop)] = (loop, client)
-    return client
+    return _pooled(_openai_clients, lambda: AsyncOpenAI(api_key=settings.openai_api_key))
+
+
+def get_async_anthropic() -> Any:
+    """Return a pooled ``AsyncAnthropic`` client bound to the running loop.
+
+    Mirrors ``get_async_openai`` so the Anthropic branch reuses its connection pool
+    instead of a fresh TLS handshake per call. The SDK import stays lazy so tests can
+    monkeypatch ``anthropic.AsyncAnthropic``. Raises ``ValueError`` if no key is set.
+    """
+    settings = get_settings()
+    if not settings.anthropic_api_key:
+        raise ValueError("ANTHROPIC_API_KEY not configured")
+    from anthropic import AsyncAnthropic
+
+    return _pooled(_anthropic_clients, lambda: AsyncAnthropic(api_key=settings.anthropic_api_key))
+
+
+def get_gemini_client(api_key: str) -> Any:
+    """Return a pooled google-genai ``Client`` bound to the running loop.
+
+    Only the parent ``Client`` is reused — callers still open a fresh
+    ``client.aio.live.connect(...)`` session per voice relay. Reusing the parent
+    avoids re-paying client construction/TLS setup on every voice session start.
+    """
+    from google import genai as google_genai
+
+    return _pooled(_gemini_clients, lambda: google_genai.Client(api_key=api_key))
 
 
 def resolve_provider(model_id: str | None) -> tuple[str, str]:
@@ -140,9 +181,6 @@ async def _anthropic_chat(
     No ``temperature`` is passed (rejected on Opus 4.8). For JSON mode we append a
     strict JSON-only instruction; the caller strips fences and parses.
     """
-    settings = get_settings()
-    from anthropic import AsyncAnthropic
-
     system = system_prompt
     if want_json:
         system = (
@@ -151,7 +189,7 @@ async def _anthropic_chat(
             "No markdown, no code fences, no prose."
         )
 
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+    client = get_async_anthropic()
     resp = await client.messages.create(
         model=model,
         max_tokens=max_tokens,

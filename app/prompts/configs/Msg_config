@@ -606,6 +606,7 @@ Analyze the provided content and extract a COMPREHENSIVE list of REAL entities, 
 8. Do NOT summarize - extract each individual item as a separate output port.
 9. The topic name should reflect what the user asked for, using underscores (e.g., "top_5_cities", "best_restaurants").
 10. CRITICAL: You MUST return at least one output port. Empty output_ports is NOT acceptable.
+11. PORT NAMING: Each output port_name MUST be the specific entity's own identifier in snake_case (e.g. `flask`, `fastapi`, `django`, `golden_gate_bridge`, `stanford_university`). NEVER use generic placeholders or positional names (`language_1`, `item_2`, `entity_3`, `port_a`). If two entities collide after normalization, disambiguate with a meaningful qualifier (e.g. `python_flask`), never a bare index.
 
 ## OUTPUT FORMAT
 Your response MUST follow the json_format_schema.json structure exactly. Return exactly ONE block in tool_calls with:
@@ -797,6 +798,13 @@ The generated file must include:
    - On error: `errors.txt`, `improvements.txt` with practical fix suggestions, empty `block_results.txt`, and `status.txt` = `error`.
 8. Main logic wrapped in `try: ... except Exception as _err:`.
 
+## CANONICAL OUTPUT PORTS
+Every generated tool MUST write these eight standard output files using these EXACT names (the manual block-creation path enforces the same set, so voice/text/manual tools stay interchangeable):
+`block_results`, `errors`, `warnings`, `code`, `status`, `block_description`, `change`, `improvements`.
+- Use these exact names — never rename or substitute alternatives (e.g. not `result`, `error`, `log`, `notes`, `description`, `state`).
+- `block_description` = a one-line description of what this tool does. `change` = a short note of what this run produced/changed (empty string on a no-op).
+- Write any additional requested output ports ALONGSIDE these eight — the canonical set is in addition to, never instead of, the requested ports.
+
 ## DATA AND OUTPUT RULES
 - Treat the Tool Requirement as the source of truth. Do not substitute a different operation.
 - Use exact input and output port names as dictionary keys and output file names.
@@ -840,7 +848,7 @@ Before returning, internally verify:
 - The file can pass `python -m py_compile`.
 - Every requested input and output port appears as a Python string literal.
 - Every requested output port is written on success.
-- `block_results.txt`, `status.txt`, `errors.txt`, `warnings.txt`, `code.txt`, and `improvements.txt` are handled.
+- All eight canonical output ports are handled: `block_results.txt`, `errors.txt`, `warnings.txt`, `code.txt`, `status.txt`, `block_description.txt`, `change.txt`, and `improvements.txt`.
 - The business logic directly satisfies the Tool Requirement.
 
 The user will provide the content to analyze in the next message. Return only the Python file.

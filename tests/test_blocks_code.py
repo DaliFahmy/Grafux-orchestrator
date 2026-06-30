@@ -59,6 +59,40 @@ async def test_generate_code_payload_uses_language_and_fills_code_port(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_generate_code_payload_overrides_mismatched_language(monkeypatch):
+    """If the model echoes a different language than requested, the port keeps the request."""
+
+    async def fake_call_openai_json(system_prompt, user_message, temperature=0.3):
+        return {"code": "print('hi')", "language": "python"}  # asked for go, got python
+
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_call_openai_json)
+
+    result = await blocks_router.generate_code_payload(
+        block_name="x", description="do thing", language="go"
+    )
+    ports = {p["port_name"]: p["port_content"] for p in result["tool_calls"][0]["params"]["output_ports"]}
+    assert ports["language"] == "go"
+
+
+@pytest.mark.asyncio
+async def test_generate_code_payload_language_alias_not_a_mismatch(monkeypatch):
+    """js vs javascript is an alias, not a mismatch — the returned value is preserved as the request."""
+
+    async def fake_call_openai_json(system_prompt, user_message, temperature=0.3):
+        return {"code": "console.log(1)", "language": "javascript"}
+
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_call_openai_json)
+
+    result = await blocks_router.generate_code_payload(
+        block_name="x", description="do thing", language="js"
+    )
+    ports = {p["port_name"]: p["port_content"] for p in result["tool_calls"][0]["params"]["output_ports"]}
+    assert ports["language"] == "js"  # surfaces the requested spelling
+
+
+@pytest.mark.asyncio
 async def test_generate_code_payload_no_key_returns_none(monkeypatch):
     monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings(key=""))
     result = await blocks_router.generate_code_payload(

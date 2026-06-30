@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import hashlib
+import time
 import uuid
 from typing import NamedTuple
 
@@ -350,22 +352,91 @@ def build_tool_codegen_message(
     return "\n\n".join(parts)
 
 
+# Small TTL cache for pure code generation. Identical (model, requirement) requests —
+# e.g. recreating a just-deleted tool, or regenerating — skip the LLM round-trip. Only
+# generate_tool_code uses it: its output is a deterministic-ish source string with no
+# embedded ids/timestamps. Topic generation is excluded (time-sensitive, web-grounded)
+# and code-payload generation is excluded (its envelope carries a fresh block_id).
+_GEN_CACHE: dict[str, tuple[float, str]] = {}
+_GEN_CACHE_TTL = 3600.0  # seconds
+_GEN_CACHE_MAX = 256
+
+
+def _gen_cache_get(key: str) -> str | None:
+    entry = _GEN_CACHE.get(key)
+    if entry is None:
+        return None
+    ts, val = entry
+    if time.monotonic() - ts > _GEN_CACHE_TTL:
+        _GEN_CACHE.pop(key, None)
+        return None
+    return val
+
+
+def _gen_cache_put(key: str, val: str) -> None:
+    if len(_GEN_CACHE) >= _GEN_CACHE_MAX and key not in _GEN_CACHE:
+        oldest = min(_GEN_CACHE, key=lambda k: _GEN_CACHE[k][0])
+        _GEN_CACHE.pop(oldest, None)
+    _GEN_CACHE[key] = (time.monotonic(), val)
+
+
 async def generate_tool_code(user_message: str, *, temperature: float = 0.2, model: str | None = None) -> str:
     """Generate a complete @register_tool-formatted Python file from a tool requirement.
 
     Uses the shared [create_tool] Msg_config section — the same structural contract the
     manual UnifiedWindow path produces — so voice/text tools fit the MCP server. Returns
-    raw Python source (markdown fences stripped).
+    raw Python source (markdown fences stripped). Identical requests are served from a
+    short-lived in-process cache to avoid re-paying the (slow) codegen round-trip.
     """
     system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["tools"])
     if not system_prompt:
         raise ValueError("create_tool prompt section missing from Msg_config")
+    cache_key = hashlib.sha256(
+        f"{model or ''}\x00{user_message}".encode()
+    ).hexdigest()
+    cached = _gen_cache_get(cache_key)
+    if cached is not None:
+        log.info("blocks_tool_codegen_cache_hit")
+        return cached
     raw = await _call_openai_text(system_prompt, user_message, temperature=temperature, model=model, max_tokens=8192)
-    return _strip_code_fences(raw)
+    code = _strip_code_fences(raw)
+    if code.strip():
+        _gen_cache_put(cache_key, code)
+    return code
 
 
 def _code_port_path(category: str, name: str, port_type: str, port_name: str) -> str:
     return f"data/code/{category}/{name}/{port_type}/{port_name}.txt"
+
+
+# Common language spellings that mean the same thing, normalized to one canonical token
+# so a returned/requested-language comparison doesn't flag js vs javascript as a mismatch.
+_LANG_ALIASES = {
+    "js": "javascript",
+    "javascript": "javascript",
+    "ts": "typescript",
+    "typescript": "typescript",
+    "py": "python",
+    "python": "python",
+    "c++": "cpp",
+    "cpp": "cpp",
+    "c#": "csharp",
+    "csharp": "csharp",
+    "cs": "csharp",
+    "golang": "go",
+    "go": "go",
+    "rs": "rust",
+    "rust": "rust",
+    "sh": "bash",
+    "shell": "bash",
+    "bash": "bash",
+}
+
+
+def _normalize_lang(lang: str) -> str:
+    """Canonicalize a language name for alias-tolerant comparison (js == javascript)."""
+    key = (lang or "").strip().lower()
+    return _LANG_ALIASES.get(key, key)
 
 
 def build_code_gen_message(
@@ -433,6 +504,16 @@ async def generate_code_payload(
     result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
     code = _strip_code_fences(str(result.get("code", "")))
 
+    # Validate the returned language against what was requested. The model occasionally
+    # echoes a different language than asked; trust the requested one (the code is what
+    # the user wired up around). Alias-aware so js/javascript etc. aren't false positives.
+    returned_lang = str(result.get("language", "")).strip()
+    if returned_lang and _normalize_lang(returned_lang) != _normalize_lang(lang):
+        log.warning(
+            "code_language_mismatch", block=name, requested=lang, returned=returned_lang,
+        )
+    out_lang = lang  # always surface the requested language on the port
+
     op = [
         {
             "port_name": "code",
@@ -456,7 +537,7 @@ async def generate_code_payload(
         },
         {
             "port_name": "language",
-            "port_content": str(result.get("language", "")).strip() or lang,
+            "port_content": out_lang,
             "port_path": _code_port_path(cat, name, "outputs", "language"),
         },
     ]
