@@ -55,7 +55,7 @@ async def test_generate_code_payload_uses_language_and_fills_code_port(monkeypat
 
     inputs = {p["port_name"]: p["port_content"] for p in params["input_ports"]}
     assert inputs["language"] == "rust"
-    assert inputs["description"] == "a function that reverses a string"
+    assert inputs["block_description"] == "a function that reverses a string"
 
 
 @pytest.mark.asyncio

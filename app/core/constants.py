@@ -20,6 +20,9 @@ class BlockType(str, Enum):
     PROCEDURES = "procedures"
     CODE = "code"
     IMAGE = "image"
+    LOCATION = "location"
+    LIVE = "live"
+    STREAM = "stream"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.

@@ -162,13 +162,43 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
         "create_block",
         "Create a new saved block (only after user confirmation).",
         {
-            "block_type": _str_prop("Block type: tools, topics, commands, code, image, etc."),
+            "block_type": _str_prop(
+                "Canonical block type (plural where applicable). Pick the best fit:\n"
+                "- topics: research/data on a subject (web-grounded entities).\n"
+                "- components: a hardware/software component's specs (web-grounded).\n"
+                "- procedures: step-by-step how-to (web-grounded).\n"
+                "- commands: a shell/CLI command block.\n"
+                "- tools: an MCP tool that runs Python (give a clear description).\n"
+                "- code: generate source code in a chosen language (set 'language').\n"
+                "- image: generate/edit/search an image (the description is the prompt).\n"
+                "- location: geocode an address and show a map (set 'address').\n"
+                "- live: watch/transcribe a YouTube video or live stream (set 'url').\n"
+                "- stream: broadcast the user's camera/mic and transcribe it.\n"
+                "- gpu: compile/run code on a cloud GPU (optionally set 'gpu_model'/'language').\n"
+                "- claw: an AI agent assembled from a description.\n"
+                "- devices: run a command/code on a connected hardware device.\n"
+                "- memory: snapshot or sequence values from other blocks.\n"
+                "- selection: pick one of several inputs by criteria.\n"
+                "- filter: filter text/image/video input by criteria."
+            ),
             "block_name": _str_prop("New block name (snake_case)."),
             "description": _str_prop("What the block does."),
             "category": _str_prop("Optional category folder for category-based types."),
             "language": _str_prop(
-                "For a 'code' block: the programming language to generate code in "
-                "(e.g. python, javascript, go, rust, c++). Ignored for other block types."
+                "For a 'code' or 'gpu' block: the programming language "
+                "(e.g. python, javascript, go, rust, c++, cuda). Ignored for other types."
+            ),
+            "address": _str_prop(
+                "For a 'location' block: the address/place to geocode "
+                "(e.g. 'Eiffel Tower, Paris'). Ignored for other types."
+            ),
+            "url": _str_prop(
+                "For a 'live' block: the YouTube video or live-stream URL. "
+                "Ignored for other types."
+            ),
+            "gpu_model": _str_prop(
+                "For a 'gpu' block: the GPU model to provision (e.g. 'NVIDIA A100'). "
+                "Optional; ignored for other types."
             ),
             "inputs": {
                 "type": "array",
@@ -246,7 +276,10 @@ def function_call_to_action(
                 action[key] = str(args[key]).strip()
 
     elif name == "create_block":
-        for key in ("block_type", "block_name", "description", "category", "language"):
+        for key in (
+            "block_type", "block_name", "description", "category",
+            "language", "address", "url", "gpu_model",
+        ):
             if key in args and args[key] is not None:
                 action[key] = args[key]
         if "inputs" in args:

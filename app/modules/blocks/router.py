@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import uuid
+from typing import NamedTuple
 
 from fastapi import APIRouter
 
@@ -179,14 +180,20 @@ async def generate_topic_payload(
     outputs: list[str] | None = None,
     ground: bool | None = None,
     model: str | None = None,
+    block_type: str = "topics",
 ) -> dict | None:
-    """Generate a grounded topic block envelope (the `tool_calls` dict) via AI.
+    """Generate a grounded search-block envelope (the `tool_calls` dict) via AI.
 
-    Shared core of the topic generator: builds the prompt, runs live web grounding when the
-    description is a short query, calls OpenAI with the [create_topic] prompt, and returns the
-    parsed ``{tool_calls, ...}`` result with output ports filled with real, current content.
+    Shared core of the topic/component/procedure/command generators: builds the prompt, runs
+    live web grounding when the block type is groundable and the description is a short query,
+    calls the LLM with that type's ``[create_*]`` prompt section, and returns the parsed
+    ``{tool_calls, ...}`` result with output ports filled with real, current content.
 
-    Returns ``None`` when OpenAI is not configured or generation fails, so callers can fall back
+    ``block_type`` selects the prompt section (topics → ``create_topic``, components →
+    ``create_component``, procedures → ``create_procedure``, commands → ``create_cmd``). Only
+    types in ``GROUNDABLE_BLOCK_TYPES`` are web-grounded; commands never are.
+
+    Returns ``None`` when no LLM is configured or generation fails, so callers can fall back
     (the REST endpoint to a simple template, the stream path to leaving the action unchanged).
     """
     settings = get_settings()
@@ -198,14 +205,14 @@ async def generate_topic_payload(
     name = topic_name.replace(" ", "_")
     cat = category or "general"
 
-    section = _BLOCK_TYPE_SECTION.get("topics", "create_topic")
+    section = _BLOCK_TYPE_SECTION.get(block_type, "create_topic")
     system_prompt = (
         get_system_prompt(section)
         + "\n\nJSON FORMAT REFERENCE:\n"
         + get_json_schema()
     )
 
-    user_message = f"Topic name: {name}\nCategory: {cat}\n"
+    user_message = f"Block name: {name}\nBlock type: {block_type}\nCategory: {cat}\n"
     if inputs:
         user_message += f"Requested input ports (besides 'block_description'): {', '.join(inputs)}\n"
     if outputs:
@@ -213,8 +220,11 @@ async def generate_topic_payload(
     if description:
         user_message += f"\nDescription / content to extract data from:\n{description[:3000]}"
 
-    # Ground the topic in live web data when no rich content was provided.
-    do_ground = (
+    # Ground in live web data when no rich content was provided — only for groundable types
+    # (topics/components/procedures). Commands and any non-groundable type are never grounded,
+    # even if the caller passes ``ground=True``.
+    groundable = block_type in _GROUNDABLE_BLOCK_TYPES
+    do_ground = groundable and (
         ground
         if ground is not None
         else len(description.strip()) < _GROUND_DESCRIPTION_MAX_CHARS
@@ -559,63 +569,174 @@ async def generate_code_block(
         return _simple_code_response(body)
 
 
-def _image_port_path(category: str, name: str, port_type: str, port_name: str) -> str:
-    return f"data/image/{category}/{name}/{port_type}/{port_name}.txt"
+# ── Scaffold-only blocks (no AI call, never need a key) ─────────────────────────
+#
+# Several block types produce their real content at *Run* time, not at creation:
+# image/location/live/stream call a Grafux-interaction service; gpu/claw/devices
+# call the devices server; memory/selection/filter are wired to other blocks.
+# For these, creation just lays out the canonical input/output ports so the block
+# has the right shape — identical to what the manual UnifiedWindow dialog builds
+# (see Grafux-app/src/ui/dialogs/unifiedblockcreationdialog.cpp). Each spec mirrors
+# that dialog's generate*/finalize* port lists.
+#
+# Spec fields:
+#   category_based     — folder layout data/<type>/<category>/<name> vs data/<type>/<name>
+#   inputs / outputs   — canonical port names (block_description is always prepended)
+#   seed_map           — {seed key from the create_block action → input port to fill}
+#   seed_from_desc     — input port seeded from the block description when no seed given
+#   defaults           — input port → default content (matches the dialog's seeds)
+class _ScaffoldSpec(NamedTuple):
+    category_based: bool
+    inputs: tuple[str, ...]
+    outputs: tuple[str, ...]
+    seed_map: dict[str, str] = {}
+    seed_from_desc: str | None = None
+    defaults: dict[str, str] = {}
 
 
-# Standard image-block ports. The image bytes are produced later by the image
-# service on Run (see Grafux-interaction/image); creation only scaffolds the
-# ports so the block has the right input/output shape to wire connections to.
-_IMAGE_INPUT_PORTS = ("prompt", "modification", "search_for")
-_IMAGE_OUTPUT_PORTS = ("image", "image_name", "image_description", "improvements", "status")
+_SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
+    "image": _ScaffoldSpec(
+        category_based=True,
+        inputs=("prompt", "modification", "search_for", "image"),
+        outputs=("image", "image_name", "image_description", "improvements", "status"),
+        seed_from_desc="prompt",
+    ),
+    "location": _ScaffoldSpec(
+        category_based=False,
+        inputs=("name", "full_address", "street", "postal_code", "city", "country"),
+        outputs=("name", "full_address", "street", "postal_code", "city", "country", "status"),
+        seed_map={"address": "full_address"},
+        seed_from_desc="full_address",
+    ),
+    "live": _ScaffoldSpec(
+        category_based=False,
+        inputs=("live_stream_link", "question"),
+        outputs=("answer", "transcript", "status"),
+        seed_map={"url": "live_stream_link"},
+    ),
+    "stream": _ScaffoldSpec(
+        category_based=False,
+        inputs=("question",),
+        outputs=("answer", "transcript", "status"),
+    ),
+    "gpu": _ScaffoldSpec(
+        category_based=True,
+        inputs=("gpu_model", "image", "cloud_type", "compile_flags", "code", "language",
+                "args", "timeout", "keep_warm_minutes", "files", "output_globs",
+                "api_keys", "credentials"),
+        outputs=("response", "status", "gpu_id", "errors", "warnings", "benchmark",
+                 "artifacts", "warm_until", "cost"),
+        seed_map={"gpu_model": "gpu_model", "language": "language"},
+    ),
+    "claw": _ScaffoldSpec(
+        category_based=True,
+        inputs=("soul", "skills", "agent", "credentials", "api_keys", "task",
+                "text_message", "memory", "tools_config", "connections"),
+        outputs=("response", "status", "claw_id", "errors"),
+    ),
+    "devices": _ScaffoldSpec(
+        category_based=True,
+        inputs=("device_id", "command", "code", "language", "args", "timeout", "text", "file"),
+        outputs=("results", "response", "status", "errors", "terminal", "file",
+                 "warnings", "improvements"),
+        defaults={"language": "cpp", "timeout": "130"},
+    ),
+    "memory": _ScaffoldSpec(
+        category_based=False,
+        inputs=("input",),
+        outputs=(),
+    ),
+    "selection": _ScaffoldSpec(
+        category_based=False,
+        inputs=("criteria",),
+        outputs=("selected", "analysis"),
+    ),
+    "filter": _ScaffoldSpec(
+        category_based=False,
+        inputs=("code", "criteria", "input"),
+        outputs=("filtered", "analysis", "errors", "warnings", "improvements", "code"),
+    ),
+}
 
 
-async def generate_image_payload(
+def _scaffold_port_path(
+    block_type: str, category_based: bool, category: str, name: str,
+    port_type: str, port_name: str,
+) -> str:
+    if category_based:
+        return f"data/{block_type}/{category}/{name}/{port_type}/{port_name}.txt"
+    return f"data/{block_type}/{name}/{port_type}/{port_name}.txt"
+
+
+async def generate_scaffold_payload(
     *,
+    block_type: str,
     block_name: str,
     category: str = "general",
     description: str = "",
     inputs: list[str] | None = None,
     outputs: list[str] | None = None,
+    seeds: dict[str, str] | None = None,
 ) -> dict | None:
-    """Build an image block envelope (the ``tool_calls`` dict) — port scaffold only.
+    """Build a scaffold-only block envelope (the ``tool_calls`` dict) — no AI call.
 
-    Unlike the topic/code generators, this makes no AI call and never needs an API
-    key: the image block produces its picture at *Run* time by calling the image
-    service (``Grafux-interaction/image``), so creation just lays out the standard
-    input ports (``block_description`` + prompt/modification/search_for) and output
-    ports (``image``/``image_name``/``image_description``/``improvements``). Any
-    extra requested ports are appended. Returns the ``{tool_calls, ...}`` envelope.
+    Lays out the canonical ports for ``block_type`` per ``_SCAFFOLD_SPECS`` (matching the
+    manual dialog), prepending ``block_description`` and appending any extra requested
+    ``inputs``/``outputs``. ``seeds`` carries the primary-input values parsed from the user's
+    command (e.g. ``{"address": "Eiffel Tower"}`` → the ``full_address`` port) so the block is
+    ready to Run. Always succeeds and never needs an API key; returns ``None`` for an unknown
+    type so the caller falls back to its own stub behavior.
     """
+    spec = _SCAFFOLD_SPECS.get(block_type)
+    if spec is None:
+        return None
+
     name = block_name.replace(" ", "_")
     cat = category or "general"
+    seeds = seeds or {}
+
+    # Resolve seed content per input port: explicit seed keys win, then description, then defaults.
+    port_seed: dict[str, str] = {}
+    for seed_key, port in spec.seed_map.items():
+        val = str(seeds.get(seed_key, "")).strip()
+        if val:
+            port_seed[port] = val
+    if spec.seed_from_desc and spec.seed_from_desc not in port_seed:
+        desc = (description or "").strip()
+        if desc:
+            port_seed[spec.seed_from_desc] = desc
+    for port, default in spec.defaults.items():
+        port_seed.setdefault(port, default)
+
+    def _path(port_type: str, port_name: str) -> str:
+        return _scaffold_port_path(block_type, spec.category_based, cat, name, port_type, port_name)
 
     ip = [
         {
             "port_name": "block_description",
             "port_content": description,
-            "port_path": _image_port_path(cat, name, "inputs", "block_description"),
+            "port_path": _path("inputs", "block_description"),
         }
     ]
-    seen_in = {"block_description"}
-    for inp in list(_IMAGE_INPUT_PORTS) + list(inputs or []):
-        if inp and inp not in seen_in and inp not in ("description",):
+    seen_in = {"block_description", "description"}
+    for inp in list(spec.inputs) + list(inputs or []):
+        if inp and inp not in seen_in:
             seen_in.add(inp)
             ip.append({
                 "port_name": inp,
-                "port_content": "",
-                "port_path": _image_port_path(cat, name, "inputs", inp),
+                "port_content": port_seed.get(inp, ""),
+                "port_path": _path("inputs", inp),
             })
 
     op = []
     seen_out: set[str] = set()
-    for out in list(_IMAGE_OUTPUT_PORTS) + list(outputs or []):
+    for out in list(spec.outputs) + list(outputs or []):
         if out and out not in seen_out:
             seen_out.add(out)
             op.append({
                 "port_name": out,
                 "port_content": "",
-                "port_path": _image_port_path(cat, name, "outputs", out),
+                "port_path": _path("outputs", out),
             })
 
     return {
@@ -627,7 +748,7 @@ async def generate_image_payload(
                 "params": {
                     "name": name,
                     "block_id": uuid.uuid4().hex[:8],
-                    "block_type": "image",
+                    "block_type": block_type,
                     "x": 0,
                     "y": 0,
                     "input_ports": ip,
@@ -637,6 +758,30 @@ async def generate_image_payload(
         ],
         "connections": [],
     }
+
+
+async def generate_image_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+) -> dict | None:
+    """Build an image block envelope — thin wrapper over :func:`generate_scaffold_payload`.
+
+    The image bytes are produced at *Run* by the image service (``Grafux-interaction/image``);
+    creation only scaffolds the ports (``block_description`` + prompt/modification/search_for/
+    image → image/image_name/image_description/improvements/status).
+    """
+    return await generate_scaffold_payload(
+        block_type="image",
+        block_name=block_name,
+        category=category,
+        description=description,
+        inputs=inputs,
+        outputs=outputs,
+    )
 
 
 @router.post("/generate/image")

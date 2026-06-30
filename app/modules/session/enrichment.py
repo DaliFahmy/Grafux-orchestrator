@@ -69,13 +69,18 @@ async def _enrich_tool_block(action: dict[str, Any], session_id: str) -> None:
         )
 
 
-async def _enrich_topic_block(action: dict[str, Any], session_id: str) -> None:
-    """Fill a newly created topic block's ports with grounded, current content."""
+async def _enrich_search_block(action: dict[str, Any], session_id: str) -> None:
+    """Fill a newly created search block's ports with AI-generated (grounded) content.
+
+    Covers topics/components/procedures/commands — each uses its own ``[create_*]`` prompt
+    section, and only the groundable types pull live web data (see ``generate_topic_payload``).
+    """
     from app.modules.blocks.router import generate_topic_payload
 
     name = str(action.get("block_name", "")).strip()
     if not name:
         return
+    block_type = str(action.get("block_type", "")).strip().lower() or "topics"
     try:
         result = await generate_topic_payload(
             topic_name=name,
@@ -83,20 +88,23 @@ async def _enrich_topic_block(action: dict[str, Any], session_id: str) -> None:
             description=str(action.get("description", "")).strip(),
             inputs=action.get("inputs") or [],
             outputs=action.get("outputs") or [],
+            block_type=block_type,
         )
         params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
         output_ports = params.get("output_ports") or []
         if not output_ports:
-            return  # nothing grounded — leave action as-is (client makes a stub)
+            return  # nothing generated — leave action as-is (client makes a stub)
         action["output_ports"] = output_ports
         if params.get("input_ports"):
             action["input_ports"] = params["input_ports"]
         log.info(
-            "create_topic_grounding_ok", session_id=session_id, block=name, ports=len(output_ports)
+            "create_search_grounding_ok",
+            session_id=session_id, block=name, block_type=block_type, ports=len(output_ports),
         )
     except Exception as exc:
         log.warning(
-            "create_topic_grounding_failed", session_id=session_id, block=name, error=str(exc)
+            "create_search_grounding_failed",
+            session_id=session_id, block=name, block_type=block_type, error=str(exc),
         )
 
 
@@ -134,43 +142,70 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> None:
         )
 
 
-async def _enrich_image_block(action: dict[str, Any], session_id: str) -> None:
-    """Lay out a newly created image block's standard ports.
+# Seed keys the model may attach to a create_block action, forwarded to the scaffold
+# builder so the primary input port is pre-filled from the command (e.g. an address or URL).
+_SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language")
 
-    The image itself is produced at Run by the image service, so enrichment only
-    scaffolds the input ports (prompt/modification/search_for) and output ports
-    (image/image_name/image_description/improvements) — matching the manual
-    UnifiedWindow path so voice/text-created image blocks have the right shape.
+
+async def _enrich_scaffold_block(action: dict[str, Any], session_id: str) -> None:
+    """Lay out a newly created scaffold block's canonical ports (no AI call).
+
+    Covers image/location/live/stream/gpu/claw/devices/memory/selection/filter — blocks whose
+    real content is produced at *Run* (by a Grafux-interaction or devices service) or by wiring.
+    Enrichment only scaffolds the ports — matching the manual UnifiedWindow path — and seeds the
+    primary input from the command so the block is ready to Run.
     """
-    from app.modules.blocks.router import generate_image_payload
+    from app.modules.blocks.router import generate_scaffold_payload
 
     name = str(action.get("block_name", "")).strip()
     if not name:
         return
+    block_type = str(action.get("block_type", "")).strip().lower()
     try:
-        result = await generate_image_payload(
+        seeds = {k: action[k] for k in _SCAFFOLD_SEED_KEYS if str(action.get(k, "")).strip()}
+        result = await generate_scaffold_payload(
+            block_type=block_type,
             block_name=name,
             category=str(action.get("category", "")).strip() or "general",
             description=str(action.get("description", "")).strip(),
             inputs=action.get("inputs") or [],
             outputs=action.get("outputs") or [],
+            seeds=seeds,
         )
         params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
         if params.get("output_ports"):
             action["output_ports"] = params["output_ports"]
         if params.get("input_ports"):
             action["input_ports"] = params["input_ports"]
-        log.info("create_image_scaffold_ok", session_id=session_id, block=name)
+        log.info("create_scaffold_ok", session_id=session_id, block=name, block_type=block_type)
     except Exception as exc:
         log.warning(
-            "create_image_scaffold_failed", session_id=session_id, block=name, error=str(exc)
+            "create_scaffold_failed",
+            session_id=session_id, block=name, block_type=block_type, error=str(exc),
         )
 
 
-# block_type → enricher. Replaces the if/elif dispatch chain.
+# block_type → enricher. ``tools``/``code`` generate real content (Python / source); the
+# search types are AI-generated (and grounded where applicable); everything else is a port
+# scaffold whose content arrives at Run. Types absent here fall through unenriched (the client
+# builds a generic stub).
 _ENRICHERS = {
     "tools": _enrich_tool_block,
-    "topics": _enrich_topic_block,
     "code": _enrich_code_block,
-    "image": _enrich_image_block,
+    # AI search blocks (own [create_*] prompt section; grounded where applicable).
+    "topics": _enrich_search_block,
+    "components": _enrich_search_block,
+    "procedures": _enrich_search_block,
+    "commands": _enrich_search_block,
+    # Scaffold-only blocks (content produced at Run or by wiring).
+    "image": _enrich_scaffold_block,
+    "location": _enrich_scaffold_block,
+    "live": _enrich_scaffold_block,
+    "stream": _enrich_scaffold_block,
+    "gpu": _enrich_scaffold_block,
+    "claw": _enrich_scaffold_block,
+    "devices": _enrich_scaffold_block,
+    "memory": _enrich_scaffold_block,
+    "selection": _enrich_scaffold_block,
+    "filter": _enrich_scaffold_block,
 }

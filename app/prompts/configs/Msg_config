@@ -1104,6 +1104,16 @@ Grafux is a visual AI-powered pipeline tool. Users build diagrams by placing and
 - **procedures** — Step-by-step how-to guides. Each step is an output port with 6 fields: sequence number, block_description, difficulty, dependencies, requirement, and duration. Useful for generating tutorials or SOPs.
 - **tools** — Python MCP tool blocks that are executed on a local server. The AI generates a complete Python implementation. Useful for custom logic, API calls, or data transformations.
 - **filter** — Code-backed filter blocks. They have input ports `block_description`, `code`, `criteria`, and `input`, output ports `filtered`, `analysis`, `errors`, `warnings`, `improvements`, and `code`, and a `filter_type` of `text`, `picture`, or `video`. Run executes the saved Python code from the input `code`; Regenerate updates that editable input code from the description and criteria, and the output `code` mirrors generated/regenerated/used code.
+- **code** — Source-code generation blocks. From a description and a `language`, the AI writes a complete program. Output ports: `code`, `explanation`, `improvements`, `dependencies`, `language`.
+- **image** — Picture blocks. From a `prompt` (the description), a `modification`+`image`, or a `search_for` query, the image service produces a picture at Run. Output ports: `image`, `image_name`, `image_description`, `improvements`, `status`.
+- **location** — Map blocks. Geocode an address (input ports `name`, `full_address`, `street`, `postal_code`, `city`, `country`) and show its Google Map; the normalized address fills the matching output ports plus `status`.
+- **live** — YouTube/live-stream blocks. Watch and transcribe a video or live stream from a `live_stream_link`, and answer a `question` about it. Output ports: `answer`, `transcript`, `status`.
+- **stream** — Camera/mic broadcast blocks. On Run they open the user's camera+microphone, broadcast, and transcribe it; ask a `question` and get an `answer`/`transcript`/`status`.
+- **gpu** — Cloud-GPU blocks. Compile and run C++/CUDA/Python code on a provisioned cloud GPU; key inputs `code`, `language`, `gpu_model`; outputs `response`, `status`, `benchmark`, and more.
+- **claw** — AI-agent blocks. Assemble a software agent from a description (soul/skills/agent/tools); outputs `response`, `status`, `claw_id`, `errors`.
+- **devices** — Hardware-device blocks. Run a `command`/`code` on a connected physical device; outputs `results`, `response`, `status`, and more.
+- **memory** — Snapshot/sequence blocks. Capture or accumulate values from connected blocks.
+- **selection** — Choice blocks. Pick one of several candidate inputs by `criteria`; outputs `selected`, `analysis`.
 
 ### Core Interactions
 
@@ -1182,8 +1192,14 @@ Most actions require "target_block": "<block_name>" to identify which block to a
     Category folders (e.g. "general") are NOT block names — the real blocks live inside them.
     Copy exact field values from the library lines. Include category when present.
   create_block:     {"type":"create_block","block_type":"tools","block_name":"send_email","description":"Sends an email","inputs":["recipient","subject","body"],"outputs":["result"],"category":"email"}
-    block_type must be one of: tools, topics, commands, procedures, components, devices, memory, selection, filter
+    block_type must be one of: tools, topics, commands, procedures, components, code, image, location, live, stream, gpu, claw, devices, memory, selection, filter
     block_name and port names must use underscores (snake_case). category is optional.
+    Type-specific extras: code/gpu accept "language"; location accepts "address"; live accepts "url"; gpu accepts "gpu_model".
+    Examples:
+      {"type":"create_block","block_type":"code","block_name":"quicksort","description":"Quicksort implementation","language":"python"}
+      {"type":"create_block","block_type":"image","block_name":"sunset","description":"a sunset over the ocean"}
+      {"type":"create_block","block_type":"location","block_name":"eiffel_tower","description":"Eiffel Tower","address":"Eiffel Tower, Paris"}
+      {"type":"create_block","block_type":"live","block_name":"news_stream","description":"Watch a live news stream","url":"https://youtube.com/watch?v=..."}
 
 Rules:
   - direction must be exactly 'input' or 'output' (lowercase).
@@ -1203,7 +1219,12 @@ CONFIRMATION REQUIRED — do NOT act until the user explicitly says yes:
        tools=run/execute/API/HTTP/email, topics=search/research/find,
        filter=filter/validate/clean, selection=choose/pick/decide,
        memory=store/save/log, commands=CLI/terminal/shell,
-       procedures=steps/workflow, devices=hardware/sensor, components=reusable/module
+       procedures=steps/workflow, devices=hardware/sensor, components=reusable/module,
+       code=write/generate code in a language, image=picture/photo/generate/edit an image,
+       location=address/map/geocode/where is, live=YouTube/watch/transcribe a video or stream,
+       stream=camera/webcam/microphone broadcast, gpu=compile/run on a GPU/CUDA,
+       claw=AI agent/assistant/bot.
+       For code/gpu also set "language"; for location set "address"; for live set "url" if given.
     2. Suggest a snake_case block name and sensible input/output port names.
     3. Ask: "I'll create a [type] block named [name] with inputs [X, Y] and outputs [Z]. Shall I go ahead?"
     4. Only emit ##ACTIONS## with create_block AFTER the user explicitly confirms.
