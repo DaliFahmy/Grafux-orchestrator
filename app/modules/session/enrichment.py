@@ -14,6 +14,9 @@ text turn and the voice relay so both produce identical blocks.
 from __future__ import annotations
 
 import asyncio
+import difflib
+import json
+import time
 from typing import Any
 
 from app.core.logging import get_logger
@@ -181,6 +184,123 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> EnrichS
 _SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language")
 
 
+# The claw design ports the devices scaffolder drafts from a description. Secrets
+# (credentials/api_keys) are intentionally excluded — they stay empty for the user.
+_CLAW_DESIGN_KEYS = ("soul", "skills", "agent", "task", "memory", "tools_config", "connections")
+
+# Cached Composio toolkit slug list (fallback normalization when the devices scaffolder is
+# unreachable but the model named apps explicitly). Refetched after the TTL lapses.
+_TOOLKITS_TTL = 3600.0
+_toolkits_cache: dict[str, Any] = {"at": 0.0, "slugs": []}
+
+
+async def _cached_toolkits(client: Any) -> list[str]:
+    """The claw toolkit slugs, cached with a 1h TTL (best-effort; ``[]`` when unavailable)."""
+    now = time.monotonic()
+    cached = _toolkits_cache["slugs"]
+    if cached and (now - _toolkits_cache["at"]) < _TOOLKITS_TTL:
+        return cached
+    slugs = await client.list_claw_toolkits()
+    if slugs:
+        _toolkits_cache["slugs"] = slugs
+        _toolkits_cache["at"] = now
+    return slugs
+
+
+def _normalize_apps(apps: list[str], slugs: list[str]) -> list[str]:
+    """Resolve app names to valid toolkit slugs (fuzzy, cutoff 0.8), de-duped (order preserved)."""
+    slugset = {s.lower() for s in slugs}
+    out: list[str] = []
+    seen: set[str] = set()
+    for app in apps:
+        a = str(app).strip().lower()
+        if not a:
+            continue
+        if slugset and a not in slugset:
+            match = difflib.get_close_matches(a, sorted(slugset), n=1, cutoff=0.8)
+            if match:
+                a = match[0]
+        if a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
+def _set_claw_port(action: dict[str, Any], port_name: str, content: str) -> None:
+    """Write ``content`` into the named input port, creating it if the scaffold omitted it."""
+    ports = action.get("input_ports") or []
+    for p in ports:
+        if str(p.get("port_name", "")).strip().lower() == port_name:
+            p["port_content"] = content
+            return
+    base_path = ""
+    for p in ports:
+        pp = str(p.get("port_path", ""))
+        if "/inputs/" in pp:
+            base_path = pp.rsplit("/", 1)[0]
+            break
+    new_port: dict[str, Any] = {"port_name": port_name, "port_content": content}
+    if base_path:
+        new_port["port_path"] = f"{base_path}/{port_name}.txt"
+    ports.append(new_port)
+    action["input_ports"] = ports
+
+
+async def _enrich_claw_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
+    """Scaffold a claw block AND draft its design ports (connections/soul/task/…).
+
+    Lays out the canonical claw ports first (no AI — the always-safe fallback), then best-effort
+    calls the devices ``/claw/scaffold`` endpoint, which AI-drafts the design ports from the
+    description and normalizes ``connections`` to valid Composio toolkit slugs (e.g. a request to
+    "send info to Google Sheets" fills the ``connections`` port with ``["googlesheets"]``). Any
+    explicit ``connections`` the model supplied are passed as a hint and honored on failure.
+    """
+    from app.modules.blocks.router import generate_scaffold_payload
+    from app.modules.devices.client import DevicesClient
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+
+    # 1. Canonical port layout — never fails, so the block is always well-formed.
+    scaffold = await generate_scaffold_payload(
+        block_type="claw",
+        block_name=name,
+        category=str(action.get("category", "")).strip() or "general",
+        description=str(action.get("description", "")).strip(),
+        inputs=action.get("inputs") or [],
+        outputs=action.get("outputs") or [],
+    )
+    params = (scaffold or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+
+    # 2. Draft the design ports (soul/task/connections/…) via the devices scaffolder.
+    description = str(action.get("description", "")).strip()
+    explicit = [str(a).strip() for a in (action.get("connections") or []) if str(a).strip()]
+    client = DevicesClient()
+    drafted = await client.scaffold_claw(description, name, connections=explicit)
+
+    if drafted:
+        for key in _CLAW_DESIGN_KEYS:
+            val = str(drafted.get(key, "") or "").strip()
+            if val:
+                _set_claw_port(action, key, val)
+    elif explicit:
+        # Devices scaffolder unreachable — still honor the user's explicit apps.
+        normalized = _normalize_apps(explicit, await _cached_toolkits(client))
+        if normalized:
+            _set_claw_port(action, "connections", json.dumps(normalized))
+
+    log.info(
+        "create_claw_ok", session_id=session_id, block=name,
+        drafted=bool(drafted), connections=bool(explicit or (drafted or {}).get("connections")),
+    )
+    return ("ok", "")
+
+
 async def _enrich_scaffold_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
     """Lay out a newly created scaffold block's canonical ports (no AI call).
 
@@ -232,7 +352,8 @@ _ENRICHERS = {
     "live": _enrich_scaffold_block,
     "stream": _enrich_scaffold_block,
     "gpu": _enrich_scaffold_block,
-    "claw": _enrich_scaffold_block,
+    # claw also drafts its design ports (connections/soul/task/…) via the devices scaffolder.
+    "claw": _enrich_claw_block,
     "devices": _enrich_scaffold_block,
     "memory": _enrich_scaffold_block,
     "selection": _enrich_scaffold_block,

@@ -1118,7 +1118,7 @@ Grafux is a visual AI-powered pipeline tool. Users build diagrams by placing and
 - **live** — YouTube/live-stream blocks. Watch and transcribe a video or live stream from a `live_stream_link`, and answer a `question` about it. Output ports: `answer`, `transcript`, `status`.
 - **stream** — Camera/mic broadcast blocks. On Run they open the user's camera+microphone, broadcast, and transcribe it; ask a `question` and get an `answer`/`transcript`/`status`.
 - **gpu** — Cloud-GPU blocks. Compile and run C++/CUDA/Python code on a provisioned cloud GPU; key inputs `code`, `language`, `gpu_model`; outputs `response`, `status`, `benchmark`, and more.
-- **claw** — AI-agent blocks. Assemble a software agent from a description (soul/skills/agent/tools); outputs `response`, `status`, `claw_id`, `errors`.
+- **claw** — AI-agent blocks. Assemble a software agent from a description (soul/skills/agent/tools); outputs `response`, `status`, `claw_id`, `errors`. It can connect to external apps via Composio (Google Sheets, Gmail, Telegram, Slack, …) — when the user wants the agent to act on an app, pass a `connections` list of lowercase app slugs (e.g. "send info to Google Sheets" → `["googlesheets"]`).
 - **devices** — Hardware-device blocks. Run a `command`/`code` on a connected physical device; outputs `results`, `response`, `status`, and more.
 - **memory** — Snapshot/sequence blocks. Capture or accumulate values from connected blocks.
 - **selection** — Choice blocks. Pick one of several candidate inputs by `criteria`; outputs `selected`, `analysis`.

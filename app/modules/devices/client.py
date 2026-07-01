@@ -82,6 +82,52 @@ class DevicesClient:
             log.error("device_status_failed", device_id=device_id, error=str(exc))
             raise
 
+    async def scaffold_claw(
+        self,
+        description: str,
+        name: str = "",
+        connections: list[str] | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Draft a claw block's design ports (soul/task/connections/…) from a description.
+
+        Wraps the devices ``POST /claw/scaffold`` endpoint (which AI-drafts the ports and
+        normalizes ``connections`` to valid Composio toolkit slugs). Best-effort: returns ``{}``
+        on any failure so the caller can fall back to the empty scaffold.
+        """
+        payload: dict[str, Any] = {"description": description, "name": name}
+        if connections:
+            payload["connections"] = connections
+        try:
+            resp = await get_http_client().post(
+                f"{self._base_url}/claw/scaffold",
+                headers=self._headers(),
+                json=payload,
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json()
+        except Exception as exc:
+            log.warning("claw_scaffold_failed", name=name, error=str(exc))
+            return {}
+
+    async def list_claw_toolkits(self, timeout: float = 10.0) -> list[str]:
+        """List the Composio toolkit slugs a claw can connect to (idempotent — safe to retry).
+
+        Wraps the devices ``GET /claw/toolkits`` endpoint. Returns ``[]`` on any failure.
+        """
+        try:
+            resp = await get_http_client().get(
+                f"{self._base_url}/claw/toolkits",
+                headers=self._headers(),
+                timeout=timeout,
+            )
+            resp.raise_for_status()
+            return resp.json().get("toolkits", [])
+        except Exception as exc:
+            log.warning("claw_toolkits_failed", error=str(exc))
+            return []
+
     async def list_devices(self, org_id: str) -> list[dict[str, Any]]:
         """List all devices for an organisation."""
         try:

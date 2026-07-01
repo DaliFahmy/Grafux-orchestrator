@@ -175,7 +175,8 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "- live: watch/transcribe a YouTube video or live stream (set 'url').\n"
                 "- stream: broadcast the user's camera/mic and transcribe it.\n"
                 "- gpu: compile/run code on a cloud GPU (optionally set 'gpu_model'/'language').\n"
-                "- claw: an AI agent assembled from a description.\n"
+                "- claw: an AI agent assembled from a description; can connect to external "
+                "apps via Composio (set 'connections' to the apps it should act on).\n"
                 "- devices: run a command/code on a connected hardware device.\n"
                 "- memory: snapshot or sequence values from other blocks.\n"
                 "- selection: pick one of several inputs by criteria.\n"
@@ -200,6 +201,16 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "For a 'gpu' block: the GPU model to provision (e.g. 'NVIDIA A100'). "
                 "Optional; ignored for other types."
             ),
+            "connections": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": (
+                    "For a 'claw' block: external app/service toolkit names the agent should "
+                    "connect to and act on (Composio toolkits), lowercase slugs, e.g. "
+                    "['googlesheets','gmail','telegram','slack']. Infer from the description "
+                    "(e.g. 'send info to Google Sheets' → ['googlesheets']). Omit for other types."
+                ),
+            },
             "inputs": {
                 "type": "array",
                 "items": {"type": "string"},
@@ -286,6 +297,8 @@ def function_call_to_action(
             action["inputs"] = args["inputs"]
         if "outputs" in args:
             action["outputs"] = args["outputs"]
+        if "connections" in args:
+            action["connections"] = args["connections"]
 
     else:
         return None
