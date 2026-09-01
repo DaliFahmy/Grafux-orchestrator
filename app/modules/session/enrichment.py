@@ -181,7 +181,8 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> EnrichS
 
 # Seed keys the model may attach to a create_block action, forwarded to the scaffold
 # builder so the primary input port is pre-filled from the command (e.g. an address or URL).
-_SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language")
+_SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language", "top", "pdk",
+                       "clock_period")
 
 
 # The claw design ports the devices scaffolder drafts from a description. Secrets
@@ -359,4 +360,10 @@ _ENRICHERS = {
     "selection": _enrich_scaffold_block,
     "filter": _enrich_scaffold_block,
     "white_board": _enrich_scaffold_block,
+    # Chip design (EDA). Scaffold-only: the RTL, netlist and GDS all arrive at
+    # Run from the tools themselves, so there is nothing for an LLM to draft here
+    # beyond the ports and their defaults (pdk, clock period, stage range).
+    "verilator": _enrich_scaffold_block,
+    "yosys": _enrich_scaffold_block,
+    "openroad": _enrich_scaffold_block,
 }

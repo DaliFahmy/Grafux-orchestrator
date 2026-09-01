@@ -11,19 +11,41 @@ from enum import Enum
 
 
 class BlockType(str, Enum):
-    """Canvas block kinds. ``str`` subclass so values compare/serialize as plain strings."""
+    """
+    Canvas block kinds. ``str`` subclass so values compare/serialize as plain strings.
 
+    This must list every type the canvas supports.  It previously covered only 11 of
+    them — gpu, claw, devices, memory, selection and filter were missing — which made
+    it a trap for anyone treating it as the registry: the real port definitions live
+    in ``_SCAFFOLD_SPECS`` (app/modules/blocks/router.py) and always had all of them.
+    The gap is closed here alongside the three chip-design types.
+    """
+
+    # Search / AI-generated
     TOPICS = "topics"
     COMPONENTS = "components"
     COMMANDS = "commands"
     TOOLS = "tools"
     PROCEDURES = "procedures"
     CODE = "code"
+    # Media & interaction
     IMAGE = "image"
     LOCATION = "location"
     LIVE = "live"
     STREAM = "stream"
     WHITE_BOARD = "white_board"
+    # Compute & hardware
+    GPU = "gpu"
+    CLAW = "claw"
+    DEVICES = "devices"
+    # Canvas plumbing
+    MEMORY = "memory"
+    SELECTION = "selection"
+    FILTER = "filter"
+    # Chip design (EDA): code -> verilator -> yosys -> openroad
+    VERILATOR = "verilator"
+    YOSYS = "yosys"
+    OPENROAD = "openroad"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.

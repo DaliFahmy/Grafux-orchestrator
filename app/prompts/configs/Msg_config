@@ -1123,6 +1123,11 @@ Grafux is a visual AI-powered pipeline tool. Users build diagrams by placing and
 - **devices** — Hardware-device blocks. Run a `command`/`code` on a connected physical device; outputs `results`, `response`, `status`, and more.
 - **memory** — Snapshot/sequence blocks. Capture or accumulate values from connected blocks.
 - **selection** — Choice blocks. Pick one of several candidate inputs by `criteria`; outputs `selected`, `analysis`.
+- **verilator** — Chip-design simulation blocks. Simulate or lint a Verilog/SystemVerilog design on a cloud container: inputs `rtl`, `testbench`, `top`, `mode` (`sim` or `lint`), `trace`; outputs `passed`, `sim_output`, `lint`, `waveform` (VCD), `rtl` (passed through to a yosys block), `status`, `errors`, `warnings`. This is how a user finds out whether AI-written RTL actually works before spending an hour on layout.
+- **yosys** — Chip-design synthesis blocks. Synthesize `rtl` into a gate-level `netlist` mapped onto a PDK's standard cells: inputs `rtl`, `top`, `pdk` (default `sky130hd`), `liberty`, `synth_flags`; outputs `netlist`, `stats` (cell count, area, flip-flop count), `report`, `status`, `errors`, `warnings`.
+- **openroad** — Chip-design physical-design blocks. Take a `netlist` through floorplan → placement → clock-tree synthesis → routing → GDSII: inputs `netlist`, `top`, `pdk`, `sdc`, `clock_port`, `clock_period`, `core_utilization`, `from_stage`/`to_stage`; outputs `gds`, `def`, `layout_png`, `metrics` (timing WNS/TNS, area, power, DRC), `reports`, `stage`, `status`. Runs for minutes to hours and reports live stage progress. With `netlist` empty it synthesizes from `rtl` itself, so it also works standalone.
+
+The chip-design chain is **code** (`language=verilog`) → **verilator** → **yosys** → **openroad**: wire `code.code` into `verilator.rtl`, `verilator.rtl` into `yosys.rtl`, and `yosys.netlist` into `openroad.netlist`.
 
 ### Core Interactions
 
@@ -1201,14 +1206,17 @@ Most actions require "target_block": "<block_name>" to identify which block to a
     Category folders (e.g. "general") are NOT block names — the real blocks live inside them.
     Copy exact field values from the library lines. Include category when present.
   create_block:     {"type":"create_block","block_type":"tools","block_name":"send_email","description":"Sends an email","inputs":["recipient","subject","body"],"outputs":["result"],"category":"email"}
-    block_type must be one of: tools, topics, commands, procedures, components, code, image, location, live, stream, white_board, gpu, claw, devices, memory, selection, filter
+    block_type must be one of: tools, topics, commands, procedures, components, code, image, location, live, stream, white_board, gpu, claw, devices, memory, selection, filter, verilator, yosys, openroad
     block_name and port names must use underscores (snake_case). category is optional.
-    Type-specific extras: code/gpu accept "language"; location accepts "address"; live accepts "url"; gpu accepts "gpu_model"; white_board uses the description as its board prompt.
+    Type-specific extras: code/gpu accept "language"; location accepts "address"; live accepts "url"; gpu accepts "gpu_model"; white_board uses the description as its board prompt; verilator/yosys/openroad accept "top", yosys/openroad accept "pdk", and openroad accepts "clock_period".
     Examples:
       {"type":"create_block","block_type":"code","block_name":"quicksort","description":"Quicksort implementation","language":"python"}
       {"type":"create_block","block_type":"image","block_name":"sunset","description":"a sunset over the ocean"}
       {"type":"create_block","block_type":"location","block_name":"eiffel_tower","description":"Eiffel Tower","address":"Eiffel Tower, Paris"}
       {"type":"create_block","block_type":"live","block_name":"news_stream","description":"Watch a live news stream","url":"https://youtube.com/watch?v=..."}
+      {"type":"create_block","block_type":"verilator","block_name":"counter_tb","description":"Simulate a 4-bit counter","top":"counter"}
+      {"type":"create_block","block_type":"yosys","block_name":"counter_synth","description":"Synthesize the counter for sky130","top":"counter","pdk":"sky130hd"}
+      {"type":"create_block","block_type":"openroad","block_name":"counter_layout","description":"Place and route the counter into a GDS","top":"counter","pdk":"sky130hd","clock_period":"10"}
 
 Rules:
   - direction must be exactly 'input' or 'output' (lowercase).
@@ -1232,8 +1240,15 @@ CONFIRMATION REQUIRED — do NOT act until the user explicitly says yes:
        code=write/generate code in a language, image=picture/photo/generate/edit an image,
        location=address/map/geocode/where is, live=YouTube/watch/transcribe a video or stream,
        stream=camera/webcam/microphone broadcast, gpu=compile/run on a GPU/CUDA,
-       claw=AI agent/assistant/bot.
+       claw=AI agent/assistant/bot,
+       verilator=simulate/test/lint/testbench/waveform an RTL design,
+       yosys=synthesize/netlist/gate-level/standard cells,
+       openroad=place and route/floorplan/layout/GDS/tapeout/physical design.
        For code/gpu also set "language"; for location set "address"; for live set "url" if given.
+       For verilator/yosys/openroad set "top" (the top module); for yosys/openroad also
+       "pdk" (default sky130hd); for openroad also "clock_period" in ns.
+       Chip design chains as code(language=verilog) -> verilator -> yosys -> openroad;
+       create only the blocks the user asked for, not the whole chain by default.
     2. Suggest a snake_case block name and sensible input/output port names.
     3. Ask: "I'll create a [type] block named [name] with inputs [X, Y] and outputs [Z]. Shall I go ahead?"
     4. Only emit ##ACTIONS## with create_block AFTER the user explicitly confirms.

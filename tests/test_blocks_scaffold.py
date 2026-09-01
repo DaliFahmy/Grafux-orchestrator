@@ -160,6 +160,126 @@ async def test_scaffold_extra_inputs_outputs_appended_and_deduped():
     assert set(outs) == {"selected", "analysis", "extra_out"}
 
 
+# ── chip design (EDA): verilator → yosys → openroad ──────────────────────────
+#
+# These assert the EXACT port sets, not just "contains". The same lists are
+# duplicated in the Qt dialog's finalize<Type>() and in the executor's
+# build<Type>Outputs(); a drift between them means an AI-created block and a
+# hand-created block of the same type get different ports, which then fails at
+# Run in a way that points nowhere near the cause.
+
+_VERILATOR_INPUTS = {
+    "block_description", "rtl", "testbench", "top", "mode", "defines",
+    "include_dirs", "files", "trace", "sim_args", "verilator_flags", "timeout",
+    "instance_type", "image", "api_keys",
+}
+_VERILATOR_OUTPUTS = {
+    "status", "passed", "sim_output", "lint", "errors", "warnings", "waveform",
+    "rtl", "top", "log", "artifacts", "eda_id", "improvements",
+}
+_YOSYS_INPUTS = {
+    "block_description", "rtl", "top", "pdk", "liberty", "synth_flags", "defines",
+    "include_dirs", "files", "timeout", "instance_type", "image", "api_keys",
+    "credentials",
+}
+_YOSYS_OUTPUTS = {
+    "netlist", "status", "top", "pdk", "stats", "report", "errors", "warnings",
+    "log", "artifacts", "eda_id", "cost",
+}
+_OPENROAD_INPUTS = {
+    "block_description", "netlist", "rtl", "top", "pdk", "sdc", "clock_port",
+    "clock_period", "core_utilization", "aspect_ratio", "die_area", "core_area",
+    "place_density", "from_stage", "to_stage", "extra_config", "files", "timeout",
+    "instance_type", "image", "api_keys",
+}
+_OPENROAD_OUTPUTS = {
+    "status", "stage", "gds", "def", "netlist_final", "spef", "layout_png",
+    "metrics", "reports", "errors", "warnings", "log", "artifacts", "eda_id",
+    "cost", "improvements",
+}
+
+
+@pytest.mark.asyncio
+async def test_scaffold_verilator_exact_ports_and_defaults():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="verilator", block_name="counter tb",
+        description="Simulate a 4-bit counter", seeds={"top": "counter"},
+    )
+    params = result["tool_calls"][0]["params"]
+    assert params["block_type"] == "verilator"
+    assert params["name"] == "counter_tb"
+    ins, outs = _ports(params, "input"), _ports(params, "output")
+    assert set(ins) == _VERILATOR_INPUTS
+    assert set(outs) == _VERILATOR_OUTPUTS
+    assert ins["top"]["port_content"] == "counter"
+    assert ins["mode"]["port_content"] == "sim"
+    assert ins["trace"]["port_content"] == "1"
+    assert ins["rtl"]["port_path"] == "data/verilator/general/counter_tb/inputs/rtl.txt"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_yosys_exact_ports_and_defaults():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="yosys", block_name="counter synth",
+        description="Synthesize the counter", seeds={"top": "counter"},
+    )
+    params = result["tool_calls"][0]["params"]
+    ins, outs = _ports(params, "input"), _ports(params, "output")
+    assert set(ins) == _YOSYS_INPUTS
+    assert set(outs) == _YOSYS_OUTPUTS
+    assert ins["top"]["port_content"] == "counter"
+    assert ins["pdk"]["port_content"] == "sky130hd"
+    assert ins["rtl"]["port_path"] == "data/yosys/general/counter_synth/inputs/rtl.txt"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_openroad_exact_ports_and_defaults():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="openroad", block_name="counter layout",
+        description="Place and route the counter",
+        seeds={"top": "counter", "pdk": "sky130hd", "clock_period": "5"},
+    )
+    params = result["tool_calls"][0]["params"]
+    ins, outs = _ports(params, "input"), _ports(params, "output")
+    assert set(ins) == _OPENROAD_INPUTS
+    assert set(outs) == _OPENROAD_OUTPUTS
+    assert ins["clock_period"]["port_content"] == "5"   # seed beats the default
+    assert ins["clock_port"]["port_content"] == "clk"
+    assert ins["from_stage"]["port_content"] == "synth"
+    assert ins["to_stage"]["port_content"] == "final"
+    assert outs["gds"]["port_path"] ==         "data/openroad/general/counter_layout/outputs/gds.txt"
+
+
+@pytest.mark.asyncio
+async def test_eda_chain_ports_line_up_for_wiring():
+    """
+    The pipeline only works if the obvious wiring is the correct one:
+    code.code -> verilator.rtl, verilator.rtl -> yosys.rtl, yosys.netlist ->
+    openroad.netlist. Guard those four port names against a well-meaning rename.
+    """
+    ver = await blocks_router.generate_scaffold_payload(
+        block_type="verilator", block_name="v")
+    yos = await blocks_router.generate_scaffold_payload(
+        block_type="yosys", block_name="y")
+    orr = await blocks_router.generate_scaffold_payload(
+        block_type="openroad", block_name="o")
+    ver_out = _ports(ver["tool_calls"][0]["params"], "output")
+    yos_in = _ports(yos["tool_calls"][0]["params"], "input")
+    yos_out = _ports(yos["tool_calls"][0]["params"], "output")
+    orr_in = _ports(orr["tool_calls"][0]["params"], "input")
+    assert "rtl" in ver_out and "rtl" in yos_in
+    assert "netlist" in yos_out and "netlist" in orr_in
+
+
+@pytest.mark.asyncio
+async def test_scaffold_eda_defaults_do_not_leak_across_types():
+    """A verilator block has no PDK; an ORFS default there would be nonsense."""
+    ver = await blocks_router.generate_scaffold_payload(
+        block_type="verilator", block_name="v")
+    ins = _ports(ver["tool_calls"][0]["params"], "input")
+    assert "pdk" not in ins and "clock_period" not in ins
+
+
 @pytest.mark.asyncio
 async def test_scaffold_unknown_type_returns_none():
     assert await blocks_router.generate_scaffold_payload(

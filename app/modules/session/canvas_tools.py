@@ -182,7 +182,15 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "- devices: run a command/code on a connected hardware device.\n"
                 "- memory: snapshot or sequence values from other blocks.\n"
                 "- selection: pick one of several inputs by criteria.\n"
-                "- filter: filter text/image/video input by criteria."
+                "- filter: filter text/image/video input by criteria.\n"
+                "- verilator: simulate or lint a Verilog/SystemVerilog design and "
+                "report pass/fail plus a waveform (chip design; set 'top').\n"
+                "- yosys: synthesize RTL into a gate-level netlist for a PDK "
+                "(chip design; set 'top'/'pdk').\n"
+                "- openroad: place and route a netlist into a chip layout/GDS "
+                "(chip design; set 'top'/'pdk'/'clock_period').\n"
+                "For chip design the usual chain is code(language=verilog) -> "
+                "verilator -> yosys -> openroad; create only the blocks asked for."
             ),
             "block_name": _str_prop("New block name (snake_case)."),
             "description": _str_prop("What the block does."),
@@ -202,6 +210,19 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
             "gpu_model": _str_prop(
                 "For a 'gpu' block: the GPU model to provision (e.g. 'NVIDIA A100'). "
                 "Optional; ignored for other types."
+            ),
+            "top": _str_prop(
+                "For a 'verilator', 'yosys' or 'openroad' block: the top-level module "
+                "name of the design (e.g. 'counter'). Optional; ignored for other types."
+            ),
+            "pdk": _str_prop(
+                "For a 'yosys' or 'openroad' block: the process design kit / OpenROAD "
+                "platform (sky130hd, sky130hs, asap7, nangate45). Defaults to sky130hd; "
+                "ignored for other types."
+            ),
+            "clock_period": _str_prop(
+                "For an 'openroad' block: the target clock period in nanoseconds "
+                "(e.g. '10'). Optional; ignored for other types."
             ),
             "connections": {
                 "type": "array",
@@ -292,6 +313,10 @@ def function_call_to_action(
         for key in (
             "block_type", "block_name", "description", "category",
             "language", "address", "url", "gpu_model",
+            # EDA seeds — see _SCAFFOLD_SEED_KEYS in enrichment.py. Forwarding them
+            # here is what lets "create a yosys block for my counter on sky130"
+            # land with top/pdk already filled instead of empty ports.
+            "top", "pdk", "clock_period",
         ):
             if key in args and args[key] is not None:
                 action[key] = args[key]

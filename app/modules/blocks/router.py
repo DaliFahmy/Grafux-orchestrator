@@ -430,6 +430,15 @@ _LANG_ALIASES = {
     "sh": "bash",
     "shell": "bash",
     "bash": "bash",
+    # Hardware description languages — the code block is how a user gets AI-written
+    # RTL onto the canvas to feed the verilator / yosys / openroad blocks, and
+    # "sv" / "system verilog" are what people actually type.
+    "verilog": "verilog",
+    "v": "verilog",
+    "sv": "systemverilog",
+    "systemverilog": "systemverilog",
+    "system verilog": "systemverilog",
+    "vhdl": "vhdl",
 }
 
 
@@ -746,6 +755,59 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         inputs=("board_name", "prompt", "notes", "board_id"),
         outputs=("board_url", "embed_url", "board_id", "summary", "status"),
         seed_from_desc="prompt",
+    ),
+    # ------------------------------------------------------------------
+    # Chip design (EDA).  These three form a pipeline on the canvas:
+    #   code (language=verilog) -> verilator -> yosys -> openroad
+    # so the ports are named to make the obvious wiring the natural one:
+    # verilator echoes "rtl" through, yosys consumes "rtl" and emits "netlist",
+    # openroad consumes "netlist".
+    #
+    # Each list must stay IDENTICAL to the Qt dialog's finalize<Type>() port
+    # arrays and to the executor's build<Type>Outputs(); tests below assert the
+    # exact sets, because a silent mismatch means AI-created and hand-created
+    # blocks get different ports.
+    # ------------------------------------------------------------------
+    # Simulate or lint a design. The block a user reaches for when the AI just
+    # wrote Verilog and they want to know whether it actually works.
+    "verilator": _ScaffoldSpec(
+        category_based=True,
+        inputs=("rtl", "testbench", "top", "mode", "defines", "include_dirs",
+                "files", "trace", "sim_args", "verilator_flags", "timeout",
+                "instance_type", "image", "api_keys"),
+        outputs=("status", "passed", "sim_output", "lint", "errors", "warnings",
+                 "waveform", "rtl", "top", "log", "artifacts", "eda_id",
+                 "improvements"),
+        seed_map={"top": "top"},
+        defaults={"mode": "sim", "trace": "1", "timeout": "900"},
+    ),
+    # Synthesize RTL into a gate-level netlist mapped onto the PDK's cells.
+    "yosys": _ScaffoldSpec(
+        category_based=True,
+        inputs=("rtl", "top", "pdk", "liberty", "synth_flags", "defines",
+                "include_dirs", "files", "timeout", "instance_type", "image",
+                "api_keys", "credentials"),
+        outputs=("netlist", "status", "top", "pdk", "stats", "report", "errors",
+                 "warnings", "log", "artifacts", "eda_id", "cost"),
+        seed_map={"top": "top", "pdk": "pdk"},
+        defaults={"pdk": "sky130hd", "timeout": "900"},
+    ),
+    # Floorplan -> place -> CTS -> route -> GDS. "rtl" is a fallback: with the
+    # netlist port empty the flow runs its own synthesis, so the block still works
+    # standalone without a yosys block upstream.
+    "openroad": _ScaffoldSpec(
+        category_based=True,
+        inputs=("netlist", "rtl", "top", "pdk", "sdc", "clock_port", "clock_period",
+                "core_utilization", "aspect_ratio", "die_area", "core_area",
+                "place_density", "from_stage", "to_stage", "extra_config", "files",
+                "timeout", "instance_type", "image", "api_keys"),
+        outputs=("status", "stage", "gds", "def", "netlist_final", "spef",
+                 "layout_png", "metrics", "reports", "errors", "warnings", "log",
+                 "artifacts", "eda_id", "cost", "improvements"),
+        seed_map={"top": "top", "pdk": "pdk", "clock_period": "clock_period"},
+        defaults={"pdk": "sky130hd", "clock_port": "clk", "clock_period": "10",
+                  "core_utilization": "45", "aspect_ratio": "1",
+                  "from_stage": "synth", "to_stage": "final", "timeout": "7200"},
     ),
 }
 
