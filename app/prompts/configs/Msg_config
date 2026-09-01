@@ -1117,6 +1117,7 @@ Grafux is a visual AI-powered pipeline tool. Users build diagrams by placing and
 - **location** — Map blocks. Geocode an address (input ports `name`, `full_address`, `street`, `postal_code`, `city`, `country`) and show its Google Map; the normalized address fills the matching output ports plus `status`.
 - **live** — YouTube/live-stream blocks. Watch and transcribe a video or live stream from a `live_stream_link`, and answer a `question` about it. Output ports: `answer`, `transcript`, `status`.
 - **stream** — Camera/mic broadcast blocks. On Run they open the user's camera+microphone, broadcast, and transcribe it; ask a `question` and get an `answer`/`transcript`/`status`.
+- **white_board** — Whiteboard blocks. On Run they create a Miro board and draw on it: with a `prompt` the AI designs the board (frames, sticky notes, arrows); without one, `notes` plus every other input port you wire in becomes a sticky note — which is how results from connected blocks get onto the board. The board is embedded in the block and pressing it opens Miro to keep editing. Output ports: `board_url`, `embed_url`, `board_id`, `summary`, `status`. Regenerate draws again onto the same board.
 - **gpu** — Cloud-GPU blocks. Compile and run C++/CUDA/Python code on a provisioned cloud GPU; key inputs `code`, `language`, `gpu_model`; outputs `response`, `status`, `benchmark`, and more.
 - **claw** — AI-agent blocks. Assemble a software agent from a description (soul/skills/agent/tools); outputs `response`, `status`, `claw_id`, `errors`. It can connect to external apps via Composio (Google Sheets, Gmail, Telegram, Slack, …) — when the user wants the agent to act on an app, pass a `connections` list of lowercase app slugs (e.g. "send info to Google Sheets" → `["googlesheets"]`).
 - **devices** — Hardware-device blocks. Run a `command`/`code` on a connected physical device; outputs `results`, `response`, `status`, and more.
@@ -1200,9 +1201,9 @@ Most actions require "target_block": "<block_name>" to identify which block to a
     Category folders (e.g. "general") are NOT block names — the real blocks live inside them.
     Copy exact field values from the library lines. Include category when present.
   create_block:     {"type":"create_block","block_type":"tools","block_name":"send_email","description":"Sends an email","inputs":["recipient","subject","body"],"outputs":["result"],"category":"email"}
-    block_type must be one of: tools, topics, commands, procedures, components, code, image, location, live, stream, gpu, claw, devices, memory, selection, filter
+    block_type must be one of: tools, topics, commands, procedures, components, code, image, location, live, stream, white_board, gpu, claw, devices, memory, selection, filter
     block_name and port names must use underscores (snake_case). category is optional.
-    Type-specific extras: code/gpu accept "language"; location accepts "address"; live accepts "url"; gpu accepts "gpu_model".
+    Type-specific extras: code/gpu accept "language"; location accepts "address"; live accepts "url"; gpu accepts "gpu_model"; white_board uses the description as its board prompt.
     Examples:
       {"type":"create_block","block_type":"code","block_name":"quicksort","description":"Quicksort implementation","language":"python"}
       {"type":"create_block","block_type":"image","block_name":"sunset","description":"a sunset over the ocean"}

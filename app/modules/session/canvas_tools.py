@@ -174,6 +174,8 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "- location: geocode an address and show a map (set 'address').\n"
                 "- live: watch/transcribe a YouTube video or live stream (set 'url').\n"
                 "- stream: broadcast the user's camera/mic and transcribe it.\n"
+                "- white_board: draw the result on a Miro whiteboard embedded in the "
+                "block; the description becomes the prompt the AI designs it from.\n"
                 "- gpu: compile/run code on a cloud GPU (optionally set 'gpu_model'/'language').\n"
                 "- claw: an AI agent assembled from a description; can connect to external "
                 "apps via Composio (set 'connections' to the apps it should act on).\n"

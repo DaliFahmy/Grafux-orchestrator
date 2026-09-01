@@ -737,6 +737,16 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         inputs=("code", "criteria", "input"),
         outputs=("filtered", "analysis", "errors", "warnings", "improvements", "code"),
     ),
+    # The whiteboard block draws on a Miro board at Run: a filled "prompt" has the AI
+    # design the board, otherwise "notes" plus any FURTHER input port the user wires in
+    # becomes a sticky note. "board_id" is filled by the first Run so a later
+    # Run/Regenerate extends the same board instead of creating another one.
+    "white_board": _ScaffoldSpec(
+        category_based=False,
+        inputs=("board_name", "prompt", "notes", "board_id"),
+        outputs=("board_url", "embed_url", "board_id", "summary", "status"),
+        seed_from_desc="prompt",
+    ),
 }
 
 

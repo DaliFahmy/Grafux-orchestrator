@@ -57,6 +57,27 @@ async def test_scaffold_location_seeds_full_address_from_description_when_no_see
 
 
 @pytest.mark.asyncio
+async def test_scaffold_white_board_ports_paths_and_prompt_seed():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="white_board",
+        block_name="q3 launch",
+        description="map our Q3 launch plan",
+    )
+    params = result["tool_calls"][0]["params"]
+    assert params["block_type"] == "white_board"
+    assert params["name"] == "q3_launch"
+
+    ins = _ports(params, "input")
+    outs = _ports(params, "output")
+    assert set(ins) == {"block_description", "board_name", "prompt", "notes", "board_id"}
+    assert set(outs) == {"board_url", "embed_url", "board_id", "summary", "status"}
+    # The description doubles as the board prompt, so the block is ready to Run.
+    assert ins["prompt"]["port_content"] == "map our Q3 launch plan"
+    # white_board is NOT category-based -> flat path.
+    assert ins["prompt"]["port_path"] == "data/white_board/q3_launch/inputs/prompt.txt"
+
+
+@pytest.mark.asyncio
 async def test_scaffold_live_seeds_link_from_url():
     result = await blocks_router.generate_scaffold_payload(
         block_type="live", block_name="news",

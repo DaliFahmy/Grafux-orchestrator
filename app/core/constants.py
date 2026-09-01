@@ -23,6 +23,7 @@ class BlockType(str, Enum):
     LOCATION = "location"
     LIVE = "live"
     STREAM = "stream"
+    WHITE_BOARD = "white_board"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.

@@ -304,7 +304,7 @@ async def _enrich_claw_block(action: dict[str, Any], session_id: str) -> EnrichS
 async def _enrich_scaffold_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
     """Lay out a newly created scaffold block's canonical ports (no AI call).
 
-    Covers image/location/live/stream/gpu/claw/devices/memory/selection/filter — blocks whose
+    Covers image/location/live/stream/white_board/gpu/claw/devices/memory/selection/filter — blocks whose
     real content is produced at *Run* (by a Grafux-interaction or devices service) or by wiring.
     Enrichment only scaffolds the ports — matching the manual UnifiedWindow path — and seeds the
     primary input from the command so the block is ready to Run.
@@ -358,4 +358,5 @@ _ENRICHERS = {
     "memory": _enrich_scaffold_block,
     "selection": _enrich_scaffold_block,
     "filter": _enrich_scaffold_block,
+    "white_board": _enrich_scaffold_block,
 }
