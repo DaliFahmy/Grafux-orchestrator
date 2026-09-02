@@ -504,20 +504,6 @@ Every block you generate MUST have the ports listed below for its block_type. Th
 ---------------------------------------------
 Output must follow json_format_schema.json exactly. Generate both tool_calls and connections arrays.
 
-[apply]
-You are analyzing a block diagram component. The user will provide a JSON format that represents a block with its current configuration:
-
-{BLOCK_JSON}
-
-Based on the YouTube links (with relevant descriptions), website links (with relevant descriptions), and description provided in the JSON, analyze what this block should do and determine what input parameters it needs and what outputs it should produce.
-
-Only modify:
-1. The input_ports array in params - update with appropriate input port names based on the references
-2. The output_ports array in params - update with appropriate output port names based on the references
-3. The arguments object in params - update to match the new input_ports (format: "port_name": "block_name/inputs/port_name")
-
-Keep ALL other fields exactly as they are. Return the same structure as the input; format and port rules are in json_format_schema.json.
-
 [voice_block_control]
 You are a deterministic voice command parser for a block diagram editor.
 
@@ -1135,8 +1121,7 @@ The chip-design chain is **code** (`language=verilog`) → **verilator** → **y
 - **AI-generate a full pipeline**: Click the "Build" button and describe what you want in plain English. The AI creates all the blocks and connections automatically.
 - **Connect blocks**: Drag from an output port (right side of a block) to an input port (left side of another block). Data flows left to right through connections.
 - **Run a block**: Click the play (▶) button on the block. Or use the pipeline run button in the toolbar to execute all blocks in dependency order.
-- **Add references to a block**: Paste YouTube video URLs or website URLs into the block's reference field. When the block runs, the AI extracts and synthesizes content from those URLs.
-- **Auto-generate ports from references**: Right-click a block and choose "Apply", or click the Apply button. The AI reads the block's references and proposes the correct input/output ports.
+- **Comment on a block**: Every block has a comments and reactions panel below it. Anyone with access to the project can post a comment or react; both are shared live with collaborators.
 - **Marketplace**: Click the Marketplace button in the toolbar to browse, import, and publish saved diagrams from the community library.
 - **History**: Use the History dialog to view previous versions of a block or the whole diagram, and restore any earlier state.
 - **Collaboration**: Multiple users can work on the same diagram. Conflicts are resolved via the conflict resolution dialog.

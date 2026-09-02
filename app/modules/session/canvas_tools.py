@@ -113,7 +113,7 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
     ),
     _func(
         "set_description",
-        "Update a block's reference description.",
+        "Update a block's description (its block_description input port).",
         {
             "target_block": _str_prop("Block name on the canvas."),
             "description": _str_prop("New description text."),

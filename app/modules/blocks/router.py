@@ -91,8 +91,8 @@ def _simple_topic_response(body: TopicGenerateRequest) -> dict:
 
 
 # A short/empty description is a user *query* ("best 5 ai tools 2026"), so we ground it in
-# live web results. A long description is already-fetched page content (the app puts
-# YouTube/website text here) and is trusted as-is — no live search.
+# live web results. A long description is treated as the user's own source material and
+# trusted as-is — no live search.
 _GROUND_DESCRIPTION_MAX_CHARS = 400
 
 
@@ -996,17 +996,14 @@ async def run_search_block(
 
     # Ground the output in live web data so the filled ports are real, current, and
     # source-cited instead of recalled from stale training knowledge. Auto-decide by
-    # default: ground the search block types, but skip when the user already attached
-    # reference material (the app injects it under these markers) — that content is the
-    # trusted source. An explicit `ground` flag overrides the heuristic.
+    # default: ground the search block types. (This used to also skip grounding when the
+    # app injected already-fetched YouTube/website text under known markers; the block
+    # reference fields that produced it are gone, so the markers can no longer appear.)
+    # An explicit `ground` flag overrides the heuristic.
     do_ground = (
         body.ground
         if body.ground is not None
-        else (
-            body.block_type in _GROUNDABLE_BLOCK_TYPES
-            and "YOUTUBE VIDEO CONTENT" not in body.context_message
-            and "WEBSITE CONTENT" not in body.context_message
-        )
+        else body.block_type in _GROUNDABLE_BLOCK_TYPES
     )
     if do_ground:
         query = (
