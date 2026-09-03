@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import hashlib
+import json
 import time
 import uuid
 from typing import NamedTuple
@@ -14,11 +15,20 @@ from app.core.constants import (
     BLOCK_TYPE_SECTION as _BLOCK_TYPE_SECTION,
 )
 from app.core.constants import (
+    CODE_FIX_RTL_SECTION as _CODE_FIX_RTL_SECTION,
+)
+from app.core.constants import (
     GROUNDABLE_BLOCK_TYPES as _GROUNDABLE_BLOCK_TYPES,
 )
 from app.core.llm import _strip_code_fences, call_llm_json, call_llm_text
 from app.core.logging import get_logger
 from app.dependencies import CurrentUser
+from app.modules.blocks.hdl import (
+    infer_top_module,
+    module_ports,
+    validate_rtl_fix,
+    validate_testbench,
+)
 from app.modules.blocks.schemas import (
     CodeGenerateRequest,
     ImageGenerateRequest,
@@ -27,6 +37,7 @@ from app.modules.blocks.schemas import (
     RunFilterRequest,
     RunSearchRequest,
     RunSelectionRequest,
+    TestbenchGenerateRequest,
     TopicGenerateRequest,
 )
 from app.prompts import get_json_schema, get_system_prompt
@@ -448,6 +459,79 @@ def _normalize_lang(lang: str) -> str:
     return _LANG_ALIASES.get(key, key)
 
 
+# The languages whose module interface can be checked and frozen across a repair.
+_HDL_LANGS = frozenset({"verilog", "systemverilog", "vhdl"})
+
+# One repair round when the fixer breaks the interface it was told to preserve.
+# One, not many: a second violation means the model has lost the thread, and the
+# user is better served by seeing the design plus the complaint than by another
+# minute of retries.
+_CODE_FIX_REPAIR_ROUNDS = 1
+
+
+def code_prompt_section(*, feedback: str, previous_code: str, language: str) -> str:
+    """
+    Which Msg_config section a code request should use: repair, or write fresh.
+
+    [fix_rtl] needs BOTH a design to repair and a report saying what is wrong with
+    it — feedback alone has nothing to edit, and a previous design alone has
+    nothing to fix. Either on its own would quietly degrade into a regeneration
+    that is free to change the port list, which is exactly what the verification
+    loop cannot survive.
+
+    HDL only. The frozen-interface rule that makes [fix_rtl] safe is meaningless
+    for Python, so a code block with feedback in any other language stays on
+    [create_code], which already treats feedback as extra requirement text.
+    """
+    if not (feedback or "").strip() or not (previous_code or "").strip():
+        return _BLOCK_TYPE_SECTION["code"]
+    if _normalize_lang(language) not in _HDL_LANGS:
+        return _BLOCK_TYPE_SECTION["code"]
+    return _CODE_FIX_RTL_SECTION
+
+
+def build_code_fix_message(
+    *,
+    block_name: str,
+    language: str,
+    top: str,
+    ports: list[str],
+    previous_code: str,
+    feedback: str,
+    description: str = "",
+    problems: list[str] | None = None,
+) -> str:
+    """Assemble the user message the [fix_rtl] prompt expects.
+
+    The INTERFACE line is the highest-value line in the prompt: it turns "keep the
+    module header identical" from an aspiration into something the model can copy
+    and the server can check afterwards with :func:`hdl.validate_rtl_fix`. It is
+    derived here from the previous design, never asked of the caller.
+    """
+    iface = ", ".join(ports) if ports else "(could not be parsed — copy the existing header verbatim)"
+    parts = [
+        f"Block name: {block_name}",
+        f"Programming language: {language or 'verilog'}",
+        f"Module interface that MUST NOT change (top module: {top or '(unknown)'}): {iface}",
+    ]
+    if (description or "").strip():
+        parts.append(f"What this design is meant to do:\n{description.strip()}")
+    parts.append(
+        "Current code (this is what failed; return a corrected version of THIS "
+        f"design):\n{previous_code.strip()}"
+    )
+    parts.append(
+        "Failing tests reported by the simulator (fix the DESIGN; the tests are "
+        f"correct and must not change):\n{feedback.strip()}"
+    )
+    if problems:
+        parts.append(
+            "Your previous attempt was REJECTED for these reasons; return a "
+            "corrected design:\n- " + "\n- ".join(problems)
+        )
+    return "\n\n".join(parts)
+
+
 def build_code_gen_message(
     *,
     block_name: str,
@@ -476,6 +560,8 @@ async def generate_code_payload(
     category: str = "general",
     description: str = "",
     language: str = "python",
+    feedback: str = "",
+    previous_code: str = "",
     inputs: list[str] | None = None,
     outputs: list[str] | None = None,
 ) -> dict | None:
@@ -488,6 +574,14 @@ async def generate_code_payload(
     generated source plus its explanation, improvement ideas, and dependency list. No web
     grounding — code generation must not be polluted with live search results.
 
+    With ``feedback`` and ``previous_code`` on an HDL language this becomes a REPAIR
+    instead: the [fix_rtl] prompt is given the failing-test report and the design that
+    produced it, and is required to return the same module interface. That is what
+    closes the verification loop — a verilator block's ``failures`` output feeds this
+    port, and the repaired design goes back round. The returned interface is checked
+    (:func:`hdl.validate_rtl_fix`) with one repair round, because a fix that renames a
+    port silently breaks the very tests it was meant to satisfy.
+
     Returns ``None`` when OpenAI is not configured or generation fails, so callers can fall
     back (the REST endpoint to an empty-port stub, the stream path to leaving the action as-is).
     """
@@ -499,19 +593,42 @@ async def generate_code_payload(
     cat = category or "general"
     lang = (language or "python").strip()
 
-    system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["code"])
+    section = code_prompt_section(
+        feedback=feedback, previous_code=previous_code, language=lang)
+    system_prompt = get_system_prompt(section)
     if not system_prompt:
-        raise ValueError("create_code prompt section missing from Msg_config")
+        raise ValueError(f"{section} prompt section missing from Msg_config")
 
-    user_message = build_code_gen_message(
-        block_name=name,
-        description=description,
-        language=lang,
-        outputs=outputs,
-    )
-
-    result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
-    code = _strip_code_fences(str(result.get("code", "")))
+    fixing = section == _CODE_FIX_RTL_SECTION
+    problems: list[str] = []
+    result: dict = {}
+    code = ""
+    if fixing:
+        top_name = infer_top_module(previous_code)
+        ports = module_ports(previous_code, top_name)
+        draft = previous_code
+        for attempt in range(_CODE_FIX_REPAIR_ROUNDS + 1):
+            user_message = build_code_fix_message(
+                block_name=name, language=lang, top=top_name, ports=ports,
+                previous_code=draft, feedback=feedback, description=description,
+                problems=problems or None,
+            )
+            result = await _call_openai_json(
+                system_prompt, user_message, temperature=0.2, max_tokens=8192)
+            code = _strip_code_fences(str(result.get("code", "")))
+            problems = validate_rtl_fix(code, previous_code, top_name)
+            if not problems:
+                break
+            log.warning("rtl_fix_rejected", block=name, attempt=attempt, problems=problems)
+    else:
+        user_message = build_code_gen_message(
+            block_name=name,
+            description=description,
+            language=lang,
+            outputs=outputs,
+        )
+        result = await _call_openai_json(system_prompt, user_message, temperature=0.2)
+        code = _strip_code_fences(str(result.get("code", "")))
 
     # Validate the returned language against what was requested. The model occasionally
     # echoes a different language than asked; trust the requested one (the code is what
@@ -522,6 +639,14 @@ async def generate_code_payload(
             "code_language_mismatch", block=name, requested=lang, returned=returned_lang,
         )
     out_lang = lang  # always surface the requested language on the port
+
+    improvements = str(result.get("improvements", ""))
+    if problems:
+        # The design is still handed back: a rejected repair the user can read and
+        # correct beats an empty port, and the loop's own interface check stops it
+        # from being propagated as though it were clean.
+        improvements = ("Validation: " + "; ".join(problems)
+                        + ("\n" + improvements if improvements else ""))
 
     op = [
         {
@@ -536,7 +661,7 @@ async def generate_code_payload(
         },
         {
             "port_name": "improvements",
-            "port_content": str(result.get("improvements", "")),
+            "port_content": improvements,
             "port_path": _code_port_path(cat, name, "outputs", "improvements"),
         },
         {
@@ -561,9 +686,18 @@ async def generate_code_payload(
             "port_content": lang,
             "port_path": _code_port_path(cat, name, "inputs", "language"),
         },
+        # The failing-test report a verilator block writes here to ask for a
+        # repair. Present on every code block so the wire can be drawn before
+        # there is anything to say.
+        {
+            "port_name": "feedback",
+            "port_content": feedback,
+            "port_path": _code_port_path(cat, name, "inputs", "feedback"),
+        },
     ]
     for inp in inputs or []:
-        if inp and inp not in ("description", "block_description", "language"):
+        if inp and inp not in ("description", "block_description", "language",
+                               "feedback"):
             ip.append({
                 "port_name": inp,
                 "port_content": "",
@@ -592,10 +726,21 @@ async def generate_code_payload(
 
 
 def _simple_code_response(body: CodeGenerateRequest) -> dict:
-    """Fallback: build a minimal code block without AI when OpenAI is not configured."""
+    """Fallback: build a minimal code block without AI when OpenAI is not configured.
+
+    On a REPAIR request the existing design is echoed back on the ``code`` port
+    rather than blanked. This is not cosmetic: the app writes these ports over the
+    block's own, so returning an empty ``code`` here would wipe a working design
+    every time a key was missing or a generation failed — the loop would destroy
+    the thing it exists to improve.
+    """
     name = body.block_name.replace(" ", "_")
     cat = body.category or "general"
     lang = (body.language or "python").strip()
+    kept_code = (body.previous_code or "").strip()
+    note = ("The design was returned unchanged: code generation is not "
+            "configured, so the reported failures could not be acted on."
+            if kept_code else "")
     return {
         "tool_calls": [
             {
@@ -613,10 +758,16 @@ def _simple_code_response(body: CodeGenerateRequest) -> dict:
                          "port_path": _code_port_path(cat, name, "inputs", "block_description")},
                         {"port_name": "language", "port_content": lang,
                          "port_path": _code_port_path(cat, name, "inputs", "language")},
+                        {"port_name": "feedback", "port_content": body.feedback,
+                         "port_path": _code_port_path(cat, name, "inputs", "feedback")},
                     ],
                     "output_ports": [
                         {"port_name": pn,
-                         "port_content": lang if pn == "language" else "",
+                         "port_content": (
+                             lang if pn == "language"
+                             else kept_code if pn == "code"
+                             else note if pn == "improvements"
+                             else ""),
                          "port_path": _code_port_path(cat, name, "outputs", pn)}
                         for pn in ("code", "explanation", "improvements", "dependencies", "language")
                     ],
@@ -647,16 +798,322 @@ async def generate_code_block(
             category=body.category,
             description=body.description,
             language=body.language,
+            feedback=body.feedback,
+            previous_code=body.previous_code,
             inputs=body.inputs,
             outputs=body.outputs,
         )
         if result is None:
             return _simple_code_response(body)
-        log.info("blocks_generate_code_ok", block=body.block_name, language=body.language)
+        log.info("blocks_generate_code_ok", block=body.block_name, language=body.language,
+                 fixing=bool(body.feedback.strip() and body.previous_code.strip()))
         return result
     except Exception as exc:
         log.error("blocks_generate_code_error", block=body.block_name, error=str(exc))
         return _simple_code_response(body)
+
+
+# ── Testbench block (AI-generated cocotb tests derived from the spec) ────────────
+
+# Frameworks the [create_testbench] prompt knows how to write. "sv" is reserved for
+# a SystemVerilog/UVM-lite harness; only cocotb is wired through verilator today.
+_TESTBENCH_FRAMEWORKS = ("cocotb",)
+
+# One repair round when the first draft fails validation (invented signals, no
+# @cocotb.test, syntax error). One, not many: a second failure means the spec or
+# interface is the problem and the user should see it on the improvements port.
+_TESTBENCH_REPAIR_ROUNDS = 1
+
+
+def build_testbench_gen_message(
+    *,
+    block_name: str,
+    top: str,
+    ports: list[str],
+    spec: str,
+    framework: str = "cocotb",
+    style: str = "directed+random",
+    coverage_goals: str = "",
+    extra_tests: str = "",
+    feedback: str = "",
+    previous_testbench: str = "",
+    problems: list[str] | None = None,
+) -> str:
+    """Assemble the user message the [create_testbench] prompt expects.
+
+    The INTERFACE is given as a bare port list — deliberately not the RTL body — so
+    the model cannot derive expectations from the implementation. An unknown
+    interface (no RTL yet) is stated as such so the model infers ports from the spec
+    and the user re-runs once the code block is wired in.
+    """
+    iface = (
+        ", ".join(ports) if ports
+        else "(unknown — no RTL wired yet; infer conventional port names from the spec "
+             "and list them in the explanation)"
+    )
+    parts = [
+        f"Block name: {block_name}",
+        f"Top module: {top or '(infer from spec)'}",
+        f"Interface (the ONLY signals you may reference as dut.<name>): {iface}",
+        f"Framework: {framework or 'cocotb'}",
+        f"Test style: {style or 'directed+random'}",
+        f"Spec (the contract every expected value must come from):\n{spec.strip()}",
+    ]
+    if coverage_goals.strip():
+        parts.append(f"Coverage goals:\n{coverage_goals.strip()}")
+    if extra_tests.strip():
+        parts.append(f"Extra tests requested:\n{extra_tests.strip()}")
+    if feedback.strip():
+        parts.append(
+            "Reviewer feedback on the previous testbench (fix the TESTS accordingly):\n"
+            f"{feedback.strip()}"
+        )
+    if previous_testbench.strip():
+        parts.append(f"Previous testbench:\n{previous_testbench.strip()}")
+    if problems:
+        parts.append(
+            "The previous draft was REJECTED for these reasons; return a corrected testbench:\n- "
+            + "\n- ".join(problems)
+        )
+    return "\n\n".join(parts)
+
+
+def _testbench_port_path(category: str, name: str, port_type: str, port_name: str) -> str:
+    return _scaffold_port_path("testbench", True, category, name, port_type, port_name)
+
+
+def _testbench_envelope(
+    *,
+    name: str,
+    category: str,
+    description: str,
+    inputs: dict[str, str],
+    outputs: dict[str, str],
+    extra_inputs: list[str] | None = None,
+    extra_outputs: list[str] | None = None,
+) -> dict:
+    """The ``{tool_calls, connections}`` envelope for a testbench block.
+
+    Port ORDER and SET come from ``_SCAFFOLD_SPECS["testbench"]`` so the generated
+    block is port-identical to the scaffold-only fallback and to the Qt dialog.
+    """
+    spec = _SCAFFOLD_SPECS["testbench"]
+    ip = [{
+        "port_name": "block_description",
+        "port_content": description,
+        "port_path": _testbench_port_path(category, name, "inputs", "block_description"),
+    }]
+    seen = {"block_description", "description"}
+    for pn in list(spec.inputs) + list(extra_inputs or []):
+        if pn and pn not in seen:
+            seen.add(pn)
+            ip.append({
+                "port_name": pn,
+                "port_content": inputs.get(pn) or spec.defaults.get(pn, ""),
+                "port_path": _testbench_port_path(category, name, "inputs", pn),
+            })
+    op = []
+    seen_out: set[str] = set()
+    for pn in list(spec.outputs) + list(extra_outputs or []):
+        if pn and pn not in seen_out:
+            seen_out.add(pn)
+            op.append({
+                "port_name": pn,
+                "port_content": outputs.get(pn, ""),
+                "port_path": _testbench_port_path(category, name, "outputs", pn),
+            })
+    return {
+        "tool_calls": [{
+            "id": 1,
+            "jsonrpc": "2.0",
+            "method": "tools/call",
+            "params": {
+                "name": name,
+                "block_id": uuid.uuid4().hex[:8],
+                "block_type": "testbench",
+                "x": 0,
+                "y": 0,
+                "input_ports": ip,
+                "output_ports": op,
+            },
+        }],
+        "connections": [],
+    }
+
+
+def _test_plan_text(raw: object) -> str:
+    """Normalise the model's test_plan (list or JSON string) to a JSON string."""
+    if isinstance(raw, (list, dict)):
+        return json.dumps(raw, ensure_ascii=False)
+    return str(raw or "")
+
+
+async def generate_testbench_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    spec: str = "",
+    rtl: str = "",
+    top: str = "",
+    framework: str = "cocotb",
+    style: str = "directed+random",
+    coverage_goals: str = "",
+    extra_tests: str = "",
+    feedback: str = "",
+    previous_testbench: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Generate a testbench block envelope via AI, validated against the RTL interface.
+
+    Flow: extract the module's port list from ``rtl`` (never the body) → ask the
+    [create_testbench] prompt for spec-derived cocotb tests → validate (Python parses,
+    has a @cocotb.test, references only real ports) → one repair round on failure →
+    surface any residual problems on ``improvements`` and mark ``status``.
+
+    Returns ``None`` when no LLM key is configured so callers fall back to a scaffold.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        return None
+
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+    spec_text = (spec or "").strip() or (description or "").strip()
+    if not spec_text:
+        raise ValueError("a spec (or description) is required to generate a testbench")
+    fw = (framework or "cocotb").strip().lower()
+    if fw not in _TESTBENCH_FRAMEWORKS:
+        log.warning("testbench_framework_unsupported", block=name, framework=fw)
+        fw = "cocotb"
+
+    top_name = (top or "").strip() or (infer_top_module(rtl) if rtl.strip() else "")
+    ports = module_ports(rtl, top_name) if rtl.strip() and top_name else []
+
+    system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["testbench"])
+    if not system_prompt:
+        raise ValueError("create_testbench prompt section missing from Msg_config")
+
+    problems: list[str] = []
+    result: dict = {}
+    testbench = ""
+    draft = previous_testbench
+    for attempt in range(_TESTBENCH_REPAIR_ROUNDS + 1):
+        user_message = build_testbench_gen_message(
+            block_name=name, top=top_name, ports=ports, spec=spec_text, framework=fw,
+            style=style, coverage_goals=coverage_goals, extra_tests=extra_tests,
+            feedback=feedback, previous_testbench=draft, problems=problems or None,
+        )
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
+        )
+        testbench = _strip_code_fences(str(result.get("testbench", "")))
+        problems = validate_testbench(testbench, rtl, top_name)
+        if not problems:
+            break
+        log.warning(
+            "testbench_validation_failed", block=name, attempt=attempt, problems=problems,
+        )
+        draft = testbench
+
+    improvements = str(result.get("improvements", "")).strip()
+    if problems:
+        improvements = (
+            "Validation: " + "; ".join(problems)
+            + ("\n" + improvements if improvements else "")
+        )
+    status = "ok" if not problems else "needs_review"
+    out_top = str(result.get("top", "")).strip() or top_name
+
+    return _testbench_envelope(
+        name=name,
+        category=cat,
+        description=description,
+        inputs={
+            "spec": spec_text,
+            "rtl": rtl,
+            "top": top_name,
+            "framework": fw,
+            "style": style or "directed+random",
+            "coverage_goals": coverage_goals,
+            "extra_tests": extra_tests,
+            "feedback": feedback,
+        },
+        outputs={
+            "testbench": testbench,
+            "sva": _strip_code_fences(str(result.get("sva", ""))),
+            "test_plan": _test_plan_text(result.get("test_plan", "")),
+            "top": out_top,
+            "explanation": str(result.get("explanation", "")),
+            "improvements": improvements,
+            "status": status,
+            "errors": "",
+        },
+        extra_inputs=inputs,
+        extra_outputs=outputs,
+    )
+
+
+def _simple_testbench_response(body: TestbenchGenerateRequest, error: str = "") -> dict:
+    """Fallback: a port-complete testbench block with no generated tests."""
+    name = body.block_name.replace(" ", "_")
+    spec_text = (body.spec or "").strip()
+    return _testbench_envelope(
+        name=name,
+        category=body.category or "general",
+        description=spec_text,
+        inputs={
+            "spec": spec_text, "rtl": body.rtl, "top": body.top,
+            "framework": body.framework or "cocotb", "style": body.style or "directed+random",
+            "coverage_goals": body.coverage_goals, "extra_tests": body.extra_tests,
+            "feedback": body.feedback,
+        },
+        outputs={"top": body.top, "status": "error" if error else "", "errors": error},
+        extra_inputs=body.inputs,
+        extra_outputs=body.outputs,
+    )
+
+
+@router.post("/generate/testbench")
+async def generate_testbench_block(
+    body: TestbenchGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Generate a testbench block (spec-derived cocotb tests) using AI, with fallback.
+
+    Serves the manual UnifiedWindow creation path and the app's Run/Regenerate
+    buttons on a testbench block. Without a key, or on failure, returns a
+    port-complete stub whose ``errors``/``status`` ports say why.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        log.info("blocks_generate_testbench_fallback", reason="no_llm_key", block=body.block_name)
+        return _simple_testbench_response(body, error="AI not configured")
+    try:
+        result = await generate_testbench_payload(
+            block_name=body.block_name,
+            category=body.category,
+            description=body.spec,
+            spec=body.spec,
+            rtl=body.rtl,
+            top=body.top,
+            framework=body.framework,
+            style=body.style,
+            coverage_goals=body.coverage_goals,
+            extra_tests=body.extra_tests,
+            feedback=body.feedback,
+            inputs=body.inputs,
+            outputs=body.outputs,
+        )
+        if result is None:
+            return _simple_testbench_response(body, error="AI not configured")
+        log.info("blocks_generate_testbench_ok", block=body.block_name, top=body.top)
+        return result
+    except Exception as exc:
+        log.error("blocks_generate_testbench_error", block=body.block_name, error=str(exc))
+        return _simple_testbench_response(body, error=str(exc))
 
 
 # ── Scaffold-only blocks (no AI call, never need a key) ─────────────────────────
@@ -770,16 +1227,27 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
     # ------------------------------------------------------------------
     # Simulate or lint a design. The block a user reaches for when the AI just
     # wrote Verilog and they want to know whether it actually works.
+    # The verification inputs sit next to the port they modify rather than at the
+    # end, because the port order is what the user reads off the block face.
+    # "mode" stays "sim": a Python testbench is recognised server-side and run as
+    # cocotb, so wiring a testbench block into an existing verilator block works
+    # without anyone remembering to change a dropdown.
+    # "max_iterations" is the ONLY port here the server never sees — the fix loop
+    # runs in the app, and the server runs exactly one simulation per request.
     "verilator": _ScaffoldSpec(
         category_based=True,
-        inputs=("rtl", "testbench", "top", "mode", "defines", "include_dirs",
-                "files", "trace", "sim_args", "verilator_flags", "timeout",
-                "instance_type", "image", "api_keys"),
-        outputs=("status", "passed", "sim_output", "lint", "errors", "warnings",
-                 "waveform", "rtl", "top", "log", "artifacts", "eda_id",
-                 "improvements"),
+        inputs=("rtl", "testbench", "sva", "top", "mode", "simulator", "tests",
+                "seed", "collect_coverage", "max_iterations", "defines",
+                "include_dirs", "files", "trace", "sim_args", "verilator_flags",
+                "timeout", "instance_type", "image", "api_keys"),
+        outputs=("status", "passed", "results", "failures", "coverage",
+                 "coverage_report", "iterations", "sim_output", "lint", "errors",
+                 "warnings", "waveform", "rtl", "top", "log", "artifacts",
+                 "eda_id", "cost", "improvements"),
         seed_map={"top": "top"},
-        defaults={"mode": "sim", "trace": "1", "timeout": "900"},
+        defaults={"mode": "sim", "trace": "1", "timeout": "900",
+                  "simulator": "verilator", "collect_coverage": "1",
+                  "max_iterations": "1"},
     ),
     # Synthesize RTL into a gate-level netlist mapped onto the PDK's cells.
     "yosys": _ScaffoldSpec(
@@ -808,6 +1276,23 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         defaults={"pdk": "sky130hd", "clock_port": "clk", "clock_period": "10",
                   "core_utilization": "45", "aspect_ratio": "1",
                   "from_stage": "synth", "to_stage": "final", "timeout": "7200"},
+    ),
+    # Verification. The testbench block is AI-generated (like code) but is listed
+    # here too so the create path always lays out the same ports whether or not
+    # the model produced content:
+    #   code.code -> testbench.rtl ; testbench.testbench -> verilator.testbench
+    # "spec" is the behaviour under test (seeded from the description when the
+    # user did not separate the two); "feedback" is a reviewer's note for a
+    # testbench repair round; "top" is echoed so verilator can be wired off it.
+    "testbench": _ScaffoldSpec(
+        category_based=True,
+        inputs=("spec", "rtl", "top", "framework", "style", "coverage_goals",
+                "extra_tests", "feedback"),
+        outputs=("testbench", "sva", "test_plan", "top", "explanation",
+                 "improvements", "status", "errors"),
+        seed_map={"top": "top", "spec": "spec"},
+        seed_from_desc="spec",
+        defaults={"framework": "cocotb", "style": "directed+random"},
     ),
 }
 

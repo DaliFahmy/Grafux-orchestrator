@@ -189,8 +189,12 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "(chip design; set 'top'/'pdk').\n"
                 "- openroad: place and route a netlist into a chip layout/GDS "
                 "(chip design; set 'top'/'pdk'/'clock_period').\n"
+                "- testbench: write a cocotb testbench that verifies a Verilog module "
+                "against its SPEC (chip verification; set 'top' and 'spec').\n"
                 "For chip design the usual chain is code(language=verilog) -> "
-                "verilator -> yosys -> openroad; create only the blocks asked for."
+                "verilator -> yosys -> openroad, and the verification loop is "
+                "code(language=verilog) + testbench -> verilator; create only the "
+                "blocks asked for."
             ),
             "block_name": _str_prop("New block name (snake_case)."),
             "description": _str_prop("What the block does."),
@@ -212,8 +216,13 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "Optional; ignored for other types."
             ),
             "top": _str_prop(
-                "For a 'verilator', 'yosys' or 'openroad' block: the top-level module "
-                "name of the design (e.g. 'counter'). Optional; ignored for other types."
+                "For a 'verilator', 'yosys', 'openroad' or 'testbench' block: the top-level "
+                "module name of the design (e.g. 'counter'). Optional; ignored for other types."
+            ),
+            "spec": _str_prop(
+                "For a 'testbench' block: the behavioural specification the tests must "
+                "check (what the module must and must not do). Falls back to the "
+                "description when omitted; ignored for other types."
             ),
             "pdk": _str_prop(
                 "For a 'yosys' or 'openroad' block: the process design kit / OpenROAD "
@@ -317,6 +326,8 @@ def function_call_to_action(
             # here is what lets "create a yosys block for my counter on sky130"
             # land with top/pdk already filled instead of empty ports.
             "top", "pdk", "clock_period",
+            # testbench seed: the spec the tests are derived from.
+            "spec",
         ):
             if key in args and args[key] is not None:
                 action[key] = args[key]

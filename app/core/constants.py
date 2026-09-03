@@ -46,6 +46,10 @@ class BlockType(str, Enum):
     VERILATOR = "verilator"
     YOSYS = "yosys"
     OPENROAD = "openroad"
+    # Verification: an AI-written cocotb testbench derived from the SPEC (not the
+    # RTL) that a verilator block runs against the design. The wedge block of the
+    # spec -> RTL -> testbench -> simulate -> fix loop.
+    TESTBENCH = "testbench"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -57,7 +61,16 @@ BLOCK_TYPE_SECTION: dict[str, str] = {
     BlockType.PROCEDURES.value: "create_procedure",
     BlockType.CODE.value: "create_code",
     BlockType.IMAGE.value: "create_image",
+    BlockType.TESTBENCH.value: "create_testbench",
 }
+
+# Msg_config section for REPAIRING an existing HDL design against failing tests.
+#
+# Deliberately NOT in BLOCK_TYPE_SECTION: it is a mode of the code block, chosen
+# per request by router.code_prompt_section(), not a block type. That map is
+# looked up as BLOCK_TYPE_SECTION.get(block_type, ...) on every AI block, and a
+# non-type key in it would eventually route a real block to the RTL fixer.
+CODE_FIX_RTL_SECTION = "fix_rtl"
 
 # Search-block types whose Run/Regenerate output is grounded in live web data.
 GROUNDABLE_BLOCK_TYPES: frozenset[str] = frozenset(

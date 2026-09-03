@@ -169,13 +169,15 @@ async def test_scaffold_extra_inputs_outputs_appended_and_deduped():
 # Run in a way that points nowhere near the cause.
 
 _VERILATOR_INPUTS = {
-    "block_description", "rtl", "testbench", "top", "mode", "defines",
+    "block_description", "rtl", "testbench", "sva", "top", "mode", "simulator",
+    "tests", "seed", "collect_coverage", "max_iterations", "defines",
     "include_dirs", "files", "trace", "sim_args", "verilator_flags", "timeout",
     "instance_type", "image", "api_keys",
 }
 _VERILATOR_OUTPUTS = {
-    "status", "passed", "sim_output", "lint", "errors", "warnings", "waveform",
-    "rtl", "top", "log", "artifacts", "eda_id", "improvements",
+    "status", "passed", "results", "failures", "coverage", "coverage_report",
+    "iterations", "sim_output", "lint", "errors", "warnings", "waveform",
+    "rtl", "top", "log", "artifacts", "eda_id", "cost", "improvements",
 }
 _YOSYS_INPUTS = {
     "block_description", "rtl", "top", "pdk", "liberty", "synth_flags", "defines",
@@ -212,8 +214,14 @@ async def test_scaffold_verilator_exact_ports_and_defaults():
     assert set(ins) == _VERILATOR_INPUTS
     assert set(outs) == _VERILATOR_OUTPUTS
     assert ins["top"]["port_content"] == "counter"
+    # mode stays "sim": a cocotb testbench is detected server-side, so wiring one
+    # into an existing block must not depend on anyone changing this dropdown.
     assert ins["mode"]["port_content"] == "sim"
     assert ins["trace"]["port_content"] == "1"
+    assert ins["simulator"]["port_content"] == "verilator"
+    assert ins["collect_coverage"]["port_content"] == "1"
+    # 1 = single-shot, today's behaviour; the fix loop is opt-in.
+    assert ins["max_iterations"]["port_content"] == "1"
     assert ins["rtl"]["port_path"] == "data/verilator/general/counter_tb/inputs/rtl.txt"
 
 

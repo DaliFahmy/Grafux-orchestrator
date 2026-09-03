@@ -182,7 +182,7 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> EnrichS
 # Seed keys the model may attach to a create_block action, forwarded to the scaffold
 # builder so the primary input port is pre-filled from the command (e.g. an address or URL).
 _SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language", "top", "pdk",
-                       "clock_period")
+                       "clock_period", "spec")
 
 
 # The claw design ports the devices scaffolder drafts from a description. Secrets
@@ -335,6 +335,63 @@ async def _enrich_scaffold_block(action: dict[str, Any], session_id: str) -> Enr
     return ("ok", "")
 
 
+async def _enrich_testbench_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
+    """Scaffold a testbench block's ports and, when there is a spec, generate the tests.
+
+    The spec comes from the action's ``spec`` seed or, failing that, the description
+    ("create a testbench for the FIFO that ignores writes when full" IS the spec in
+    practice). RTL is rarely available at voice-create time — the code block it will
+    be wired to may not exist yet — so the interface is left for the model to infer
+    from the spec and Run re-generates once ``rtl`` is wired. Without any spec the
+    block is scaffolded empty, ready to fill and Run.
+    """
+    from app.modules.blocks.router import generate_scaffold_payload, generate_testbench_payload
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+    category = str(action.get("category", "")).strip() or "general"
+    description = str(action.get("description", "")).strip()
+    spec = str(action.get("spec", "")).strip() or description
+    top = str(action.get("top", "")).strip()
+
+    result = None
+    if spec:
+        result = await generate_testbench_payload(
+            block_name=name,
+            category=category,
+            description=description,
+            spec=spec,
+            rtl=str(action.get("rtl", "")).strip(),
+            top=top,
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+        )
+    status: EnrichStatus = ("ok", "")
+    if result is None:
+        result = await generate_scaffold_payload(
+            block_type="testbench",
+            block_name=name,
+            category=category,
+            description=description,
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+            seeds={k: action[k] for k in ("top", "spec") if str(action.get(k, "")).strip()},
+        )
+        if spec:
+            status = ("failed", "AI not configured")
+    params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+    log.info(
+        "create_testbench_ok", session_id=session_id, block=name,
+        generated=bool(spec) and status[0] == "ok",
+    )
+    return status
+
+
 # block_type → enricher. ``tools``/``code`` generate real content (Python / source); the
 # search types are AI-generated (and grounded where applicable); everything else is a port
 # scaffold whose content arrives at Run. Types absent here fall through unenriched (the client
@@ -366,4 +423,7 @@ _ENRICHERS = {
     "verilator": _enrich_scaffold_block,
     "yosys": _enrich_scaffold_block,
     "openroad": _enrich_scaffold_block,
+    # The testbench IS AI content (tests derived from the spec), so it generates at
+    # create time like code, falling back to a port scaffold without a spec/key.
+    "testbench": _enrich_testbench_block,
 }

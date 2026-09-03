@@ -19,10 +19,47 @@ class TopicGenerateRequest(BaseModel):
 
 
 class CodeGenerateRequest(BaseModel):
+    """Inputs for the code block's AI generation (create, Run and Regenerate).
+
+    ``feedback`` plus ``previous_code`` switch the request from "write this" to
+    "repair this": for an HDL language they select the [fix_rtl] prompt, whose
+    contract is a minimal change to the given design that makes the reported
+    failing tests pass, with the module interface left byte-identical. Both are
+    required for that — feedback with no previous design has nothing to repair,
+    and a previous design with no feedback has nothing to repair it against.
+    """
+
     block_name: str
     category: str = "general"
     description: str = ""
     language: str = "python"
+    # A failing-test report, normally the verilator block's ``failures`` output.
+    feedback: str = ""
+    # The design that produced it; its interface is frozen during the repair.
+    previous_code: str = ""
+    inputs: list[str] = []
+    outputs: list[str] = []
+
+
+class TestbenchGenerateRequest(BaseModel):
+    """Inputs for the testbench block's AI generation (create, Run and Regenerate).
+
+    ``spec`` is the behavioural specification the tests are derived from; ``rtl`` is
+    only used to extract the module interface (port names) so the generated testbench
+    references real signals. ``feedback`` carries a reviewer's notes on a previous
+    testbench (e.g. "test_full_flag expects the wrong latency") for a repair round.
+    """
+
+    block_name: str
+    category: str = "general"
+    spec: str = ""
+    rtl: str = ""
+    top: str = ""
+    framework: str = "cocotb"
+    style: str = "directed+random"
+    coverage_goals: str = ""
+    extra_tests: str = ""
+    feedback: str = ""
     inputs: list[str] = []
     outputs: list[str] = []
 
