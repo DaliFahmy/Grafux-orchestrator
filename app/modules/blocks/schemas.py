@@ -101,6 +101,33 @@ class RunFilterRequest(BaseModel):
     run_llm_model: str | None = None
 
 
+
+class ImprovementsRequest(BaseModel):
+    """Inputs for reviewing a run that has ALREADY finished.
+
+    ``run`` is the evidence, as a port-name -> text map taken straight off the
+    block's outputs.  It is deliberately an open dict rather than named fields:
+    the devices server grows output ports over time, and a fixed schema here
+    would silently drop the newest evidence.  The app caps every value before
+    sending (``EdaImprovements::buildRequestBody`` in
+    Grafux-app/src/clients/grafux-devices/edaimprovements.h); the server's own
+    cap is a backstop against a client that does not.
+
+    ``verdict`` is a named field rather than a ``run`` key because the prompt
+    BRANCHES on it -- a passing verilator run gets the coverage review, a
+    failing one gets root-cause analysis -- and the app knows it unambiguously
+    from VerificationResults::parse().  Making the model re-derive it from a
+    JSON blob is exactly how a pass gets reviewed as a failure.
+    """
+
+    block_name: str
+    kind: str = "device"          # "verilator" | "openroad" | "device"
+    block_description: str = ""
+    verdict: str = ""             # "passed" | "failed" | "error" | ""
+    run: dict[str, str] = {}      # port name -> evidence text
+    run_llm_model: str | None = None
+
+
 class RegenerateToolRequest(BaseModel):
     block_name: str
     prompt: str

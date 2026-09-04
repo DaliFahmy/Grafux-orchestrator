@@ -177,7 +177,10 @@ _VERILATOR_INPUTS = {
 _VERILATOR_OUTPUTS = {
     "status", "passed", "results", "failures", "coverage", "coverage_report",
     "iterations", "sim_output", "lint", "errors", "warnings", "waveform",
-    "rtl", "top", "log", "artifacts", "eda_id", "cost", "improvements",
+    "rtl", "top", "log", "artifacts", "eda_id", "cost",
+    # Split in two: the review of the DESIGN and the review of the TESTS land on
+    # separate ports so each can be wired somewhere different.
+    "improvements_rtl", "improvements_test",
 }
 _YOSYS_INPUTS = {
     "block_description", "rtl", "top", "pdk", "liberty", "synth_flags", "defines",

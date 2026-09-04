@@ -32,6 +32,7 @@ from app.modules.blocks.hdl import (
 from app.modules.blocks.schemas import (
     CodeGenerateRequest,
     ImageGenerateRequest,
+    ImprovementsRequest,
     RegenerateFilterRequest,
     RegenerateToolRequest,
     RunFilterRequest,
@@ -1243,7 +1244,7 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         outputs=("status", "passed", "results", "failures", "coverage",
                  "coverage_report", "iterations", "sim_output", "lint", "errors",
                  "warnings", "waveform", "rtl", "top", "log", "artifacts",
-                 "eda_id", "cost", "improvements"),
+                 "eda_id", "cost", "improvements_rtl", "improvements_test"),
         seed_map={"top": "top"},
         defaults={"mode": "sim", "trace": "1", "timeout": "900",
                   "simulator": "verilator", "collect_coverage": "1",
@@ -1571,6 +1572,148 @@ async def run_filter_block(
         log.error("blocks_run_filter_error", block=body.block_name, error=str(exc))
         raise
 
+
+
+# ---------------------------------------------------------------------------
+# Run review -> the improvements ports
+# ---------------------------------------------------------------------------
+#
+# The improvements ports are the one output an EDA/device run CANNOT produce:
+# they are a REVIEW of the run, not a product of it.  The devices server emits
+# results, coverage and logs; turning those into "here is what to change" needs
+# a model, so it lands here rather than in Grafux-devices.
+#
+# One prompt section serves all three kinds.  The output contract is identical
+# (prose buckets), so three sections would triple the OUTPUT FORMAT/PROHIBITIONS
+# boilerplate AND need a kind->section map -- a second BLOCK_TYPE_SECTION, which
+# app/core/constants.py explicitly warns against.  The evidence is already
+# labelled by port name in the user message, so the model needs a lens, not a
+# different persona.
+
+# Server-side belt-and-braces cap.  The app caps every field before sending
+# (EdaImprovements::buildRequestBody); this bounds the whole message so a client
+# that does not cap cannot turn one finished run into a 400k-token call.
+_IMPROVEMENTS_MAX_CHARS = 80_000
+
+# Evidence dropped first when the message is over budget: the least specific
+# sections, in order.  Everything not listed is kept, so `failures`, `results`
+# and `rtl` -- the sections the review is actually built from -- are the last
+# things to go.  Mirrors the client-side drop order deliberately.
+_IMPROVEMENTS_DROP_ORDER = ("log", "sim_output", "reports", "artifacts", "coverage")
+
+# The buckets the model returns, mapped onto ports by the app.  Named for what
+# they MEAN rather than for the verilator port names, because "improvements_rtl"
+# is a nonsense label for a device block running Python.
+_IMPROVEMENTS_KEYS = ("design", "tests", "summary")
+
+
+def build_improvements_message(
+    *,
+    kind: str,
+    block_description: str = "",
+    verdict: str = "",
+    run: dict[str, str] | None = None,
+) -> str:
+    """Assemble the user message ``[improve_run]`` expects, under the size cap.
+
+    Sections are emitted in a stable order so the model's attention lands the
+    same way on every call, and each carries its PORT NAME as the label -- that
+    label is what the prompt tells the model to cite as evidence.
+    """
+    run = run or {}
+    head = [f"KIND: {kind}"]
+    if verdict:
+        head.append(f"VERDICT: {verdict}")
+    if block_description.strip():
+        head.append(f"DESCRIPTION: {block_description.strip()}")
+
+    # Drop the least specific evidence until the body fits, rather than
+    # truncating blindly: a review that lost `failures` to make room for a log
+    # tail is worse than one that never saw the log.
+    sections = dict(run)
+    def render() -> str:
+        parts = ["\n".join(head)]
+        for name, text in sections.items():
+            if not (text or "").strip():
+                continue
+            parts.append(f"--- {name} ---\n{text.strip()}")
+        return "\n\n".join(parts)
+
+    body = render()
+    for droppable in _IMPROVEMENTS_DROP_ORDER:
+        if len(body) <= _IMPROVEMENTS_MAX_CHARS:
+            break
+        if sections.pop(droppable, None) is not None:
+            body = render()
+
+    if len(body) > _IMPROVEMENTS_MAX_CHARS:
+        body = body[:_IMPROVEMENTS_MAX_CHARS] + "\n...[truncated]"
+    return body
+
+
+async def generate_improvements_payload(
+    *,
+    block_name: str,
+    kind: str = "device",
+    block_description: str = "",
+    verdict: str = "",
+    run: dict[str, str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Review a finished run.  Returns {"design", "tests", "summary"} or None.
+
+    ``None`` means "no LLM configured".  The caller answers with a graceful
+    empty result rather than raising: the run itself already SUCCEEDED, and a
+    review outage must never turn a green run red on the canvas.
+    """
+    settings = get_settings()
+    if not (getattr(settings, "openai_api_key", "") or getattr(settings, "anthropic_api_key", "")):
+        return None
+
+    system_prompt = get_system_prompt("improve_run")
+    if not system_prompt:
+        raise ValueError("improve_run prompt section is missing from Msg_config")
+
+    user_message = build_improvements_message(
+        kind=kind, block_description=block_description, verdict=verdict, run=run
+    )
+    raw = await _call_openai_json(
+        system_prompt, user_message, temperature=0.3, model=model, max_tokens=2048
+    )
+    return {key: str(raw.get(key, "") or "").strip() for key in _IMPROVEMENTS_KEYS}
+
+
+@router.post("/run/improvements")
+async def run_improvements(body: ImprovementsRequest, user: CurrentUser) -> dict:
+    """Review a finished verilator / openroad / device run for its improvements ports.
+
+    NEVER raises.  Every failure path returns HTTP 200 with ``status="error"``
+    and empty buckets, because this endpoint is called AFTER the run has already
+    been reported to the user -- see generate_improvements_payload.
+    """
+    try:
+        payload = await generate_improvements_payload(
+            block_name=body.block_name,
+            kind=body.kind,
+            block_description=body.block_description,
+            verdict=body.verdict,
+            run=body.run,
+            model=body.run_llm_model,
+        )
+        if payload is None:
+            log.info("blocks_improvements_no_key", block=body.block_name, kind=body.kind)
+            return {
+                "design": "",
+                "tests": "",
+                "summary": "",
+                "status": "error",
+                "errors": "no AI key configured, so the run could not be reviewed",
+            }
+        log.info("blocks_improvements_ok", block=body.block_name, kind=body.kind)
+        return {**payload, "status": "ok", "errors": ""}
+    except Exception as exc:  # noqa: BLE001 - deliberately total; see docstring
+        log.error("blocks_improvements_error", block=body.block_name, error=str(exc))
+        return {"design": "", "tests": "", "summary": "", "status": "error", "errors": str(exc)}
 
 @router.post("/regenerate/tool")
 async def regenerate_tool_block(
