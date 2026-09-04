@@ -291,7 +291,10 @@ class _OrchestratorSession:
     # ── Action streaming / enrichment ─────────────────────────────────────────
 
     # Keys an enricher may fill on an action; only these are forwarded as the patch.
-    _PATCH_KEYS = ("output_ports", "input_ports", "code", "language")
+    # "memory_mode" is here because the memory enricher NORMALISES it (an unknown
+    # mode becomes snapshot) and the ports it scaffolds only make sense alongside
+    # the mode the client then persists on the block.
+    _PATCH_KEYS = ("output_ports", "input_ports", "code", "language", "memory_mode")
 
     @staticmethod
     def _stamp_actions(actions: list[Any]) -> None:

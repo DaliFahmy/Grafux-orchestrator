@@ -180,7 +180,9 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "- claw: an AI agent assembled from a description; can connect to external "
                 "apps via Composio (set 'connections' to the apps it should act on).\n"
                 "- devices: run a command/code on a connected hardware device.\n"
-                "- memory: snapshot or sequence values from other blocks.\n"
+                "- memory: remember values from other blocks - snapshot them, step "
+                "through them in sequence, or accumulate them into one growing record "
+                "with an AI review of each addition (memory_mode).\n"
                 "- selection: pick one of several inputs by criteria.\n"
                 "- filter: filter text/image/video input by criteria.\n"
                 "- verilator: simulate or lint a Verilog/SystemVerilog design and "
@@ -191,17 +193,31 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "(chip design; set 'top'/'pdk'/'clock_period').\n"
                 "- testbench: write a cocotb testbench that verifies a Verilog module "
                 "against its SPEC (chip verification; set 'top' and 'spec').\n"
-                "For chip design the usual chain is code(language=verilog) -> "
-                "verilator -> yosys -> openroad, and the verification loop is "
-                "code(language=verilog) + testbench -> verilator; create only the "
-                "blocks asked for."
+                "- code_hdl: write a synthesizable RTL design (verilog, systemverilog "
+                "or vhdl) from a SPEC (chip design; set 'top', 'spec' and 'language'). "
+                "Prefer this over 'code' whenever the user wants hardware.\n"
+                "- spec_hdl: turn a rough explanation of some hardware into a "
+                "rigorous, numbered SPECIFICATION (chip design; set 'explanation', "
+                "and 'top'/'language' when known). Its 'spec' output feeds BOTH a "
+                "code_hdl and a testbench block, which is what makes a design and "
+                "its tests agree about what correct means. Create it when the user "
+                "describes hardware loosely, wants the requirements written down, or "
+                "asks for a spec.\n"
+                "For chip design the usual chain is spec_hdl -> code_hdl -> verilator "
+                "-> yosys -> openroad, and the verification loop is spec_hdl feeding "
+                "BOTH code_hdl and testbench, which both feed verilator; a plain code "
+                "block with language=verilog still works for canvases built that way. "
+                "Create only the blocks asked for."
             ),
             "block_name": _str_prop("New block name (snake_case)."),
             "description": _str_prop("What the block does."),
             "category": _str_prop("Optional category folder for category-based types."),
             "language": _str_prop(
                 "For a 'code' or 'gpu' block: the programming language "
-                "(e.g. python, javascript, go, rust, c++, cuda). Ignored for other types."
+                "(e.g. python, javascript, go, rust, c++, cuda). For a 'code_hdl' or "
+                "'spec_hdl' block: the hardware description language, one of verilog, "
+                "systemverilog or vhdl (defaults to systemverilog). "
+                "Ignored for other types."
             ),
             "address": _str_prop(
                 "For a 'location' block: the address/place to geocode "
@@ -211,17 +227,40 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "For a 'live' block: the YouTube video or live-stream URL. "
                 "Ignored for other types."
             ),
+            "memory_mode": _str_prop(
+                "For a 'memory' block: how it remembers. One of 'snapshot' (each run "
+                "copies the input into a new timestamped output), 'sequential' (each "
+                "run emits the next of several inputs, wrapping around) or "
+                "'accumulate' (each run appends the 'data' input to a growing "
+                "'accumulated_data' record and writes an AI review of how the new "
+                "data relates to what is already there onto 'analysis'). Defaults to "
+                "snapshot; ignored for other types."
+            ),
             "gpu_model": _str_prop(
                 "For a 'gpu' block: the GPU model to provision (e.g. 'NVIDIA A100'). "
                 "Optional; ignored for other types."
             ),
             "top": _str_prop(
-                "For a 'verilator', 'yosys', 'openroad' or 'testbench' block: the top-level "
-                "module name of the design (e.g. 'counter'). Optional; ignored for other types."
+                "For a 'verilator', 'yosys', 'openroad', 'testbench', 'code_hdl' or "
+                "'spec_hdl' block: the top-level module name of the design (e.g. "
+                "'counter'). "
+                "Optional; ignored for other types."
             ),
             "spec": _str_prop(
                 "For a 'testbench' block: the behavioural specification the tests must "
-                "check (what the module must and must not do). Falls back to the "
+                "check. For a 'code_hdl' block: the same specification, which the "
+                "design must implement — passing the identical text to both is what "
+                "makes a design and its tests agree about what correct means. Either "
+                "way it says what the module must and must not do. Falls back to the "
+                "description when omitted; ignored for other types. Prefer creating a "
+                "'spec_hdl' block and wiring its 'spec' output into both when the user "
+                "has only described the hardware loosely."
+            ),
+            "explanation": _str_prop(
+                "For a 'spec_hdl' block: the rough, plain-language description of the "
+                "hardware to specify (e.g. 'a small FIFO between two clock domains that "
+                "drops writes when it is full'). Unlike 'spec' this is the INPUT to be "
+                "made rigorous, not an already-rigorous contract. Falls back to the "
                 "description when omitted; ignored for other types."
             ),
             "pdk": _str_prop(
@@ -326,8 +365,9 @@ def function_call_to_action(
             # here is what lets "create a yosys block for my counter on sky130"
             # land with top/pdk already filled instead of empty ports.
             "top", "pdk", "clock_period",
-            # testbench seed: the spec the tests are derived from.
-            "spec",
+            # testbench / code_hdl seed: the spec the tests and the design share,
+            # and the rough explanation the spec_hdl block makes rigorous.
+            "spec", "explanation",
         ):
             if key in args and args[key] is not None:
                 action[key] = args[key]

@@ -359,3 +359,131 @@ async def test_default_block_type_is_topics(monkeypatch):
 
     await blocks_router.generate_topic_payload(topic_name="ai", description="short")
     assert captured["section"] == "create_topic"
+
+
+# ── memory: the one type whose ports come from a param, not the type ─────────
+#
+# These mirror UnifiedBlockCreationDialog::generateMemory() in the app. If the two
+# drift, a memory block created from the toolbar and one created by voice get
+# different ports and the failure only shows up at Run, pointing nowhere near the
+# cause -- the same contract the EdaPorts tests guard.
+
+
+@pytest.mark.asyncio
+async def test_scaffold_memory_defaults_to_snapshot_shape():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="memory", block_name="run history", description="every run",
+    )
+    params = result["tool_calls"][0]["params"]
+    ins = _ports(params, "input")
+    outs = _ports(params, "output")
+    # snapshot: one "input"; the timestamped outputs are created at Run, not here.
+    assert set(ins) == {"block_description", "input"}
+    assert outs == {}
+    # memory is NOT category-based -> flat path.
+    assert ins["input"]["port_path"] == "data/memory/run_history/inputs/input.txt"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_memory_sequential_adds_the_output_port():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="memory",
+        block_name="ab_test",
+        spec_override=blocks_router.memory_scaffold_spec("sequential"),
+    )
+    params = result["tool_calls"][0]["params"]
+    assert set(_ports(params, "input")) == {"block_description", "input"}
+    assert set(_ports(params, "output")) == {"output"}
+
+
+@pytest.mark.asyncio
+async def test_scaffold_memory_accumulate_ports_and_paths():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="memory",
+        block_name="research log",
+        description="what we know so far",
+        spec_override=blocks_router.memory_scaffold_spec("accumulate"),
+    )
+    params = result["tool_calls"][0]["params"]
+    ins = _ports(params, "input")
+    outs = _ports(params, "output")
+    assert set(ins) == {"block_description", "data"}
+    assert set(outs) == {"accumulated_data", "analysis"}
+    assert ins["data"]["port_path"] == "data/memory/research_log/inputs/data.txt"
+    assert outs["analysis"]["port_path"] == "data/memory/research_log/outputs/analysis.txt"
+    # Both outputs start empty: the record grows at Run and its review comes back
+    # from /blocks/run/accumulate.
+    assert outs["accumulated_data"]["port_content"] == ""
+    assert outs["analysis"]["port_content"] == ""
+
+
+def test_memory_scaffold_spec_falls_back_to_snapshot():
+    snapshot = blocks_router.memory_scaffold_spec("snapshot")
+    # An unknown or empty mode must not become "the other known one".
+    assert blocks_router.memory_scaffold_spec("") == snapshot
+    assert blocks_router.memory_scaffold_spec("nonsense") == snapshot
+    assert blocks_router.memory_scaffold_spec("ACCUMULATE") == \
+        blocks_router.memory_scaffold_spec("accumulate")
+    assert set(blocks_router.MEMORY_MODES) == {"snapshot", "sequential", "accumulate"}
+
+
+def test_memory_registry_entry_matches_the_snapshot_mode():
+    # A caller that does not know about modes still gets a working block.
+    assert blocks_router._SCAFFOLD_SPECS["memory"] == blocks_router.memory_scaffold_spec("snapshot")
+
+
+# ── /run/accumulate: the analysis of one new value ───────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_accumulate_caps_and_marks_a_truncated_record(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["system"] = system_prompt
+        captured["user"] = user_message
+        return {"analysis": "new", "repeated": False, "contradictions": []}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    # Filler characters that appear nowhere in the prompt boilerplate, so the
+    # counts below measure only what was carried through.
+    previous = "Q" * (blocks_router._ACCUMULATE_MAX_PREVIOUS_CHARS + 5_000)
+    new_data = "Z" * (blocks_router._ACCUMULATE_MAX_NEW_CHARS + 5_000)
+    body = blocks_router.RunAccumulateRequest(
+        block_name="research_log", previous_accumulated=previous, new_data=new_data,
+    )
+
+    result = await blocks_router.run_accumulate_block(body, user=None)
+
+    assert result == {"analysis": "new", "repeated": False, "contradictions": []}
+    # The record is kept from its TAIL, and the cut is marked so the prompt's
+    # "do not claim an absence you cannot see" rule has something to fire on.
+    assert blocks_router._ACCUMULATE_TRUNCATION_MARKER in captured["user"]
+    assert captured["user"].count("Q") == blocks_router._ACCUMULATE_MAX_PREVIOUS_CHARS
+    assert captured["user"].count("Z") == blocks_router._ACCUMULATE_MAX_NEW_CHARS
+
+
+@pytest.mark.asyncio
+async def test_run_accumulate_leaves_a_short_record_unmarked(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["user"] = user_message
+        return {"analysis": "", "repeated": True, "contradictions": ["a vs b"]}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    body = blocks_router.RunAccumulateRequest(
+        block_name="log",
+        description="deployment facts",
+        previous_accumulated="deploys to Render",
+        new_data="deploys to Fly.io",
+    )
+    result = await blocks_router.run_accumulate_block(body, user=None)
+
+    assert result["contradictions"] == ["a vs b"]
+    assert blocks_router._ACCUMULATE_TRUNCATION_MARKER not in captured["user"]
+    assert "deploys to Render" in captured["user"]
+    assert "deploys to Fly.io" in captured["user"]
+    assert "deployment facts" in captured["user"]

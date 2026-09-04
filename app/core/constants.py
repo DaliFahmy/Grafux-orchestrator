@@ -50,6 +50,21 @@ class BlockType(str, Enum):
     # RTL) that a verilator block runs against the design. The wedge block of the
     # spec -> RTL -> testbench -> simulate -> fix loop.
     TESTBENCH = "testbench"
+    # The RTL source of that same loop: a spec-driven HDL generator. Kept apart
+    # from CODE because a design needs a spec, a frozen module interface and
+    # synthesizability rules that a general-purpose programming prompt has no
+    # reason to know about. CODE still accepts an HDL language, so canvases built
+    # before this type keep working.
+    CODE_HDL = "code_hdl"
+    # ...and the CONTRACT both of those derive from: a spec-driven specification
+    # writer. It turns a rough explanation plus the parameters a design always
+    # needs (widths, sync/async, combinational/sequential) into an enumerated,
+    # testable spec, and feeds the SAME text to CODE_HDL and TESTBENCH — which is
+    # the only thing that makes a design and its tests agree about what "correct"
+    # means. It also closes the OUTER loop: [fix_rtl] can repair a design against
+    # failing tests, but nothing could repair the contract they were both derived
+    # from, which is the actual root cause whenever the two disagree.
+    SPEC_HDL = "spec_hdl"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -62,6 +77,8 @@ BLOCK_TYPE_SECTION: dict[str, str] = {
     BlockType.CODE.value: "create_code",
     BlockType.IMAGE.value: "create_image",
     BlockType.TESTBENCH.value: "create_testbench",
+    BlockType.CODE_HDL.value: "create_code_hdl",
+    BlockType.SPEC_HDL.value: "create_spec_hdl",
 }
 
 # Msg_config section for REPAIRING an existing HDL design against failing tests.

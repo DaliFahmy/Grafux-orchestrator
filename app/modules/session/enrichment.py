@@ -182,7 +182,7 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> EnrichS
 # Seed keys the model may attach to a create_block action, forwarded to the scaffold
 # builder so the primary input port is pre-filled from the command (e.g. an address or URL).
 _SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language", "top", "pdk",
-                       "clock_period", "spec")
+                       "clock_period", "spec", "explanation")
 
 
 # The claw design ports the devices scaffolder drafts from a description. Secrets
@@ -305,7 +305,7 @@ async def _enrich_claw_block(action: dict[str, Any], session_id: str) -> EnrichS
 async def _enrich_scaffold_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
     """Lay out a newly created scaffold block's canonical ports (no AI call).
 
-    Covers image/location/live/stream/white_board/gpu/claw/devices/memory/selection/filter — blocks whose
+    Covers image/location/live/stream/white_board/gpu/claw/devices/selection/filter — blocks whose
     real content is produced at *Run* (by a Grafux-interaction or devices service) or by wiring.
     Enrichment only scaffolds the ports — matching the manual UnifiedWindow path — and seeds the
     primary input from the command so the block is ready to Run.
@@ -332,6 +332,50 @@ async def _enrich_scaffold_block(action: dict[str, Any], session_id: str) -> Enr
     if params.get("input_ports"):
         action["input_ports"] = params["input_ports"]
     log.info("create_scaffold_ok", session_id=session_id, block=name, block_type=block_type)
+    return ("ok", "")
+
+
+async def _enrich_memory_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
+    """Scaffold a memory block's ports for the mode it was asked for.
+
+    Memory is the one scaffold type whose ports depend on a PARAM, not just the
+    type: snapshot, sequential and accumulate are three different blocks. Without
+    this the generic scaffolder would always lay out the snapshot shape, so "create
+    an accumulate memory block" produced a snapshot one with no way to tell.
+
+    The normalised mode is written back onto the action because the client needs it
+    too — ``memory_mode`` is persisted on the block and decides what Run does.
+    """
+    from app.modules.blocks.router import (
+        MEMORY_MODES,
+        generate_scaffold_payload,
+        memory_scaffold_spec,
+    )
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+
+    mode = str(action.get("memory_mode", "")).strip().lower()
+    if mode not in MEMORY_MODES:
+        mode = "snapshot"
+    action["memory_mode"] = mode
+
+    result = await generate_scaffold_payload(
+        block_type="memory",
+        block_name=name,
+        category=str(action.get("category", "")).strip() or "general",
+        description=str(action.get("description", "")).strip(),
+        inputs=action.get("inputs") or [],
+        outputs=action.get("outputs") or [],
+        spec_override=memory_scaffold_spec(mode),
+    )
+    params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+    log.info("create_memory_ok", session_id=session_id, block=name, memory_mode=mode)
     return ("ok", "")
 
 
@@ -392,6 +436,146 @@ async def _enrich_testbench_block(action: dict[str, Any], session_id: str) -> En
     return status
 
 
+async def _enrich_code_hdl_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
+    """Scaffold a code_hdl block's ports and, when there is a spec, generate the design.
+
+    Mirrors :func:`_enrich_testbench_block`, and for the same reason: the spec comes
+    from the action's ``spec`` seed or, failing that, the description ("an 8-entry
+    FIFO that ignores writes when full" IS the spec in practice). The top module
+    defaults to the block name so the testbench and simulator have something to
+    address before the user has typed anything. Without any spec the block is
+    scaffolded empty, ready to fill and Run.
+    """
+    from app.modules.blocks.router import generate_code_hdl_payload, generate_scaffold_payload
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+    category = str(action.get("category", "")).strip() or "general"
+    description = str(action.get("description", "")).strip()
+    spec = str(action.get("spec", "")).strip() or description
+    top = str(action.get("top", "")).strip() or name.replace(" ", "_")
+    language = str(action.get("language", "")).strip() or "systemverilog"
+
+    result = None
+    status: EnrichStatus = ("ok", "")
+    if spec:
+        try:
+            result = await generate_code_hdl_payload(
+                block_name=name,
+                category=category,
+                description=description,
+                spec=spec,
+                language=language,
+                top=top,
+                inputs=action.get("inputs") or [],
+                outputs=action.get("outputs") or [],
+            )
+        except ValueError as exc:
+            # A non-HDL language reached the block (the chat guessed "python").
+            # Scaffold it rather than failing the whole create: the user can pick a
+            # language on the block and Run.
+            log.warning("create_code_hdl_rejected", session_id=session_id, block=name,
+                        error=str(exc))
+            status = ("failed", str(exc))
+            language = "systemverilog"
+    if result is None:
+        result = await generate_scaffold_payload(
+            block_type="code_hdl",
+            block_name=name,
+            category=category,
+            description=description,
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+            seeds={"top": top, "spec": spec, "language": language},
+        )
+        if spec and status[0] == "ok":
+            status = ("failed", "AI not configured")
+    params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+    log.info(
+        "create_code_hdl_ok", session_id=session_id, block=name, language=language,
+        generated=bool(spec) and status[0] == "ok",
+    )
+    return status
+
+
+async def _enrich_spec_hdl_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
+    """Scaffold a spec_hdl block's ports and write the specification from the description.
+
+    The third of the spec-driven trio, and the one where the description is most
+    obviously the real input: "create a spec for an 8-entry FIFO that ignores
+    writes when full" IS the explanation, so there is nothing for the user to
+    re-type. The `spec` seed key is accepted as an alias because the chat model
+    has been told to pass the shared specification under that name for the whole
+    HDL family, and a user who says "with this spec: ..." should not get an empty
+    block for using the word the tool schema uses.
+
+    A non-HDL language is scaffolded rather than failed, exactly as on code_hdl:
+    the chat guesses "python" often enough that losing the whole block over it
+    would be worse than a block whose language port needs one correction.
+    """
+    from app.modules.blocks.router import generate_scaffold_payload, generate_spec_hdl_payload
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+    category = str(action.get("category", "")).strip() or "general"
+    description = str(action.get("description", "")).strip()
+    explanation = (
+        str(action.get("explanation", "")).strip()
+        or str(action.get("spec", "")).strip()
+        or description
+    )
+    top = str(action.get("top", "")).strip()
+    language = str(action.get("language", "")).strip() or "systemverilog"
+
+    result = None
+    status: EnrichStatus = ("ok", "")
+    if explanation:
+        try:
+            result = await generate_spec_hdl_payload(
+                block_name=name,
+                category=category,
+                description=description,
+                explanation=explanation,
+                language=language,
+                top=top,
+                inputs=action.get("inputs") or [],
+                outputs=action.get("outputs") or [],
+            )
+        except ValueError as exc:
+            log.warning("create_spec_hdl_rejected", session_id=session_id, block=name,
+                        error=str(exc))
+            status = ("failed", str(exc))
+            language = "systemverilog"
+    if result is None:
+        result = await generate_scaffold_payload(
+            block_type="spec_hdl",
+            block_name=name,
+            category=category,
+            description=description,
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+            seeds={"top": top, "spec": explanation, "language": language},
+        )
+        if explanation and status[0] == "ok":
+            status = ("failed", "AI not configured")
+    params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+    log.info(
+        "create_spec_hdl_ok", session_id=session_id, block=name, language=language,
+        generated=bool(explanation) and status[0] == "ok",
+    )
+    return status
+
+
 # block_type → enricher. ``tools``/``code`` generate real content (Python / source); the
 # search types are AI-generated (and grounded where applicable); everything else is a port
 # scaffold whose content arrives at Run. Types absent here fall through unenriched (the client
@@ -413,7 +597,9 @@ _ENRICHERS = {
     # claw also drafts its design ports (connections/soul/task/…) via the devices scaffolder.
     "claw": _enrich_claw_block,
     "devices": _enrich_scaffold_block,
-    "memory": _enrich_scaffold_block,
+    # memory picks its ports from memory_mode, so it needs more than the generic
+    # scaffolder (snapshot / sequential / accumulate are three different blocks).
+    "memory": _enrich_memory_block,
     "selection": _enrich_scaffold_block,
     "filter": _enrich_scaffold_block,
     "white_board": _enrich_scaffold_block,
@@ -426,4 +612,8 @@ _ENRICHERS = {
     # The testbench IS AI content (tests derived from the spec), so it generates at
     # create time like code, falling back to a port scaffold without a spec/key.
     "testbench": _enrich_testbench_block,
+    # So is the design it verifies: spec in, synthesizable RTL out.
+    "code_hdl": _enrich_code_hdl_block,
+    # ...and so is the contract BOTH of those are written from.
+    "spec_hdl": _enrich_spec_hdl_block,
 }

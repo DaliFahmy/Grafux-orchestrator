@@ -24,20 +24,27 @@ from app.core.llm import _strip_code_fences, call_llm_json, call_llm_text
 from app.core.logging import get_logger
 from app.dependencies import CurrentUser
 from app.modules.blocks.hdl import (
+    design_interface,
+    hdl_family,
     infer_top_module,
     module_ports,
+    validate_hdl_design,
     validate_rtl_fix,
+    validate_spec,
     validate_testbench,
 )
 from app.modules.blocks.schemas import (
     CodeGenerateRequest,
+    CodeHdlGenerateRequest,
     ImageGenerateRequest,
     ImprovementsRequest,
     RegenerateFilterRequest,
     RegenerateToolRequest,
+    RunAccumulateRequest,
     RunFilterRequest,
     RunSearchRequest,
     RunSelectionRequest,
+    SpecHdlGenerateRequest,
     TestbenchGenerateRequest,
     TopicGenerateRequest,
 )
@@ -879,12 +886,9 @@ def build_testbench_gen_message(
     return "\n\n".join(parts)
 
 
-def _testbench_port_path(category: str, name: str, port_type: str, port_name: str) -> str:
-    return _scaffold_port_path("testbench", True, category, name, port_type, port_name)
-
-
-def _testbench_envelope(
+def _generated_envelope(
     *,
+    block_type: str,
     name: str,
     category: str,
     description: str,
@@ -893,16 +897,25 @@ def _testbench_envelope(
     extra_inputs: list[str] | None = None,
     extra_outputs: list[str] | None = None,
 ) -> dict:
-    """The ``{tool_calls, connections}`` envelope for a testbench block.
+    """The ``{tool_calls, connections}`` envelope for an AI-generated, scaffolded block.
 
-    Port ORDER and SET come from ``_SCAFFOLD_SPECS["testbench"]`` so the generated
+    Port ORDER and SET come from ``_SCAFFOLD_SPECS[block_type]`` so the generated
     block is port-identical to the scaffold-only fallback and to the Qt dialog.
+    Shared by every block type whose content is written by the model but whose
+    port list is fixed (testbench, code_hdl) — as opposed to the code block, which
+    predates the scaffold specs and spells its ports out inline.
     """
-    spec = _SCAFFOLD_SPECS["testbench"]
+    spec = _SCAFFOLD_SPECS[block_type]
+
+    def port_path(port_type: str, port_name: str) -> str:
+        return _scaffold_port_path(
+            block_type, spec.category_based, category, name, port_type, port_name
+        )
+
     ip = [{
         "port_name": "block_description",
         "port_content": description,
-        "port_path": _testbench_port_path(category, name, "inputs", "block_description"),
+        "port_path": port_path("inputs", "block_description"),
     }]
     seen = {"block_description", "description"}
     for pn in list(spec.inputs) + list(extra_inputs or []):
@@ -911,7 +924,7 @@ def _testbench_envelope(
             ip.append({
                 "port_name": pn,
                 "port_content": inputs.get(pn) or spec.defaults.get(pn, ""),
-                "port_path": _testbench_port_path(category, name, "inputs", pn),
+                "port_path": port_path("inputs", pn),
             })
     op = []
     seen_out: set[str] = set()
@@ -921,7 +934,7 @@ def _testbench_envelope(
             op.append({
                 "port_name": pn,
                 "port_content": outputs.get(pn, ""),
-                "port_path": _testbench_port_path(category, name, "outputs", pn),
+                "port_path": port_path("outputs", pn),
             })
     return {
         "tool_calls": [{
@@ -931,7 +944,7 @@ def _testbench_envelope(
             "params": {
                 "name": name,
                 "block_id": uuid.uuid4().hex[:8],
-                "block_type": "testbench",
+                "block_type": block_type,
                 "x": 0,
                 "y": 0,
                 "input_ports": ip,
@@ -1028,7 +1041,8 @@ async def generate_testbench_payload(
     status = "ok" if not problems else "needs_review"
     out_top = str(result.get("top", "")).strip() or top_name
 
-    return _testbench_envelope(
+    return _generated_envelope(
+        block_type="testbench",
         name=name,
         category=cat,
         description=description,
@@ -1061,7 +1075,8 @@ def _simple_testbench_response(body: TestbenchGenerateRequest, error: str = "") 
     """Fallback: a port-complete testbench block with no generated tests."""
     name = body.block_name.replace(" ", "_")
     spec_text = (body.spec or "").strip()
-    return _testbench_envelope(
+    return _generated_envelope(
+        block_type="testbench",
         name=name,
         category=body.category or "general",
         description=spec_text,
@@ -1115,6 +1130,665 @@ async def generate_testbench_block(
     except Exception as exc:
         log.error("blocks_generate_testbench_error", block=body.block_name, error=str(exc))
         return _simple_testbench_response(body, error=str(exc))
+
+
+# ── spec_hdl block (AI-written specification: the contract the loop turns on) ──
+
+# One repair round, for the same reason code_hdl takes one: a second failure
+# means the EXPLANATION is the problem, and the user is better served by seeing
+# that on the improvements port than by paying for another round of it.
+_SPEC_HDL_REPAIR_ROUNDS = 1
+
+# The design parameters a hardware spec always needs and prose always leaves
+# implicit. Each is a port on the block; this table is what turns a filled port
+# into a line the prompt can honour, and keeps the wording identical between the
+# fresh and the revision flow.
+_SPEC_PARAM_LABELS: tuple[tuple[str, str], ...] = (
+    ("data_width", "Data width"),
+    ("addr_width", "Address width"),
+    ("parameters", "Further parameters"),
+    ("logic_style", "Logic style (combinational / sequential)"),
+    ("reset_style", "Reset style"),
+    ("clocking", "Clocking scheme"),
+    ("protocol", "Interface protocol"),
+    ("throughput", "Throughput / latency requirement"),
+)
+
+# Values that mean "you decide". A port carrying its own default is not an
+# instruction, and forwarding it as one would have the model dutifully specify a
+# synchronous active-high reset for a purely combinational block.
+_SPEC_PARAM_UNSET = frozenset({"auto", "any", "n/a", "na", "none", "-", "unspecified"})
+
+
+def spec_hdl_parameters(values: dict[str, str]) -> list[str]:
+    """The filled design parameters as ``"Label: value"`` lines, in port order."""
+    lines = []
+    for port, label in _SPEC_PARAM_LABELS:
+        val = str(values.get(port, "") or "").strip()
+        if val and val.lower() not in _SPEC_PARAM_UNSET:
+            lines.append(f"{label}: {val}")
+    return lines
+
+
+def build_spec_hdl_gen_message(
+    *,
+    block_name: str,
+    explanation: str,
+    language: str,
+    top: str,
+    parameters: list[str] | None = None,
+    constraints: str = "",
+    design: str = "",
+    previous_spec: str = "",
+    feedback: str = "",
+    problems: list[str] | None = None,
+) -> str:
+    """Assemble the user message the [create_spec_hdl] prompt expects.
+
+    One builder for both flows, unlike code_hdl's pair: a revision is the same
+    request with the current spec and the feedback appended, because the output
+    contract does not change - the model still returns a whole specification,
+    never a diff. There is no separate [fix_spec] section for the same reason.
+    """
+    parts = [
+        f"Block name: {block_name}",
+        f"Target hardware description language: {language or 'systemverilog'}",
+        f"Top module: {top or block_name}",
+        f"Explanation (the rough description to specify):\n{explanation.strip()}",
+    ]
+    if parameters:
+        parts.append("Design parameters (the user pinned these; honour them exactly):\n- "
+                     + "\n- ".join(parameters))
+    if constraints.strip():
+        parts.append(
+            "Constraints (target technology, conventions, anything the explanation "
+            f"does not cover):\n{constraints.strip()}"
+        )
+    if design.strip():
+        parts.append(
+            "Existing design (specify what the module SHOULD do; where this code "
+            "disagrees, say so in improvements rather than ratifying it):\n"
+            f"{design.strip()}"
+        )
+    if previous_spec.strip():
+        parts.append(
+            "Current specification (revise it; keep the requirement numbering "
+            f"stable):\n{previous_spec.strip()}"
+        )
+    if feedback.strip():
+        parts.append(
+            "Feedback saying the current specification is wrong, incomplete or "
+            f"ambiguous (revise the clauses it implicates, keep the rest):\n{feedback.strip()}"
+        )
+    if problems:
+        parts.append(
+            "Your previous draft was REJECTED for these reasons; return a corrected "
+            "specification:\n- " + "\n- ".join(problems)
+        )
+    return "\n\n".join(parts)
+
+
+async def generate_spec_hdl_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    explanation: str = "",
+    previous_code: str = "",
+    previous_spec: str = "",
+    language: str = "systemverilog",
+    top: str = "",
+    data_width: str = "",
+    addr_width: str = "",
+    parameters: str = "",
+    logic_style: str = "",
+    reset_style: str = "",
+    clocking: str = "",
+    protocol: str = "",
+    throughput: str = "",
+    constraints: str = "",
+    feedback: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Generate (or revise) a spec_hdl block envelope via AI.
+
+    [create_spec_hdl] writes the contract from the explanation and the pinned
+    design parameters -> :func:`validate_spec` checks it is traceable (enumerated
+    requirements), machine-readable (the interface parses) and self-consistent
+    (the signals discussed exist) -> one repair round on failure -> residual
+    problems and every warning land on ``improvements`` with
+    ``status=needs_review``.
+
+    ``feedback`` does not switch prompts the way it does on a code block. The
+    output contract is identical either way - a whole specification, never a
+    diff - so a revision is the same section with the current spec and the
+    failure appended, and there is no [fix_spec] to keep in step with it.
+
+    ``top`` is taken from the model's answer only when the caller did not pin
+    one, so a canvas wired to a module name cannot have it renamed underneath it.
+
+    Returns ``None`` when no LLM key is configured so callers fall back to a scaffold.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        return None
+
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+    lang = _normalize_lang(language) or "systemverilog"
+    if lang not in _HDL_LANGS:
+        raise ValueError(
+            f"'{language}' is not a hardware description language; "
+            f"spec_hdl accepts {', '.join(sorted(_HDL_LANGS))}"
+        )
+
+    text = (explanation or "").strip() or (description or "").strip()
+    design = (previous_code or "").strip()
+    if not text and not design:
+        raise ValueError(
+            "an explanation (or description, or an existing design) is required "
+            "to write a specification"
+        )
+    # A spec written from RTL alone is a legitimate request - recovering the
+    # contract of a design someone inherited - so the explanation is allowed to
+    # be empty as long as there is something to specify.
+    if not text:
+        text = (
+            "Recover the specification of the existing design below: state the "
+            "behaviour its interface implies, as a contract a new implementation "
+            "could be written against."
+        )
+
+    system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["spec_hdl"])
+    if not system_prompt:
+        raise ValueError("create_spec_hdl prompt section missing from Msg_config")
+
+    pinned_top = (top or "").strip()
+    param_lines = spec_hdl_parameters({
+        "data_width": data_width, "addr_width": addr_width, "parameters": parameters,
+        "logic_style": logic_style, "reset_style": reset_style, "clocking": clocking,
+        "protocol": protocol, "throughput": throughput,
+    })
+
+    problems: list[str] = []
+    warnings: list[str] = []
+    result: dict = {}
+    draft_spec = (previous_spec or "").strip()
+    for attempt in range(_SPEC_HDL_REPAIR_ROUNDS + 1):
+        user_message = build_spec_hdl_gen_message(
+            block_name=name, explanation=text, language=lang,
+            top=pinned_top or name, parameters=param_lines, constraints=constraints,
+            design=design, previous_spec=draft_spec, feedback=feedback,
+            problems=problems or None,
+        )
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
+        )
+        spec_text = _strip_code_fences(str(result.get("spec", "")))
+        problems, warnings = validate_spec(
+            spec_text,
+            str(result.get("requirements", "")),
+            str(result.get("interface", "")),
+            signals_analysis=str(result.get("signals_analysis", "")),
+            design=design,
+            top=pinned_top,
+        )
+        if not problems:
+            break
+        log.warning(
+            "spec_hdl_validation_failed", block=name, attempt=attempt, problems=problems,
+        )
+        draft_spec = spec_text or draft_spec
+
+    spec_text = _strip_code_fences(str(result.get("spec", "")))
+    # A revision that produced nothing must not blank the contract it was meant
+    # to improve: the app overwrites every port it is handed, and losing the spec
+    # loses the design and the tests with it.
+    if not spec_text.strip() and (previous_spec or "").strip():
+        spec_text = previous_spec.strip()
+
+    notes = list(problems) + list(warnings)
+    improvements = str(result.get("improvements", "")).strip()
+    if notes:
+        improvements = (
+            "Validation: " + "; ".join(notes) + ("\n" + improvements if improvements else "")
+        )
+
+    out_top = pinned_top or str(result.get("top", "")).strip() or name
+
+    return _generated_envelope(
+        block_type="spec_hdl",
+        name=name,
+        category=cat,
+        description=description,
+        inputs={
+            "explanation": text,
+            "previous_code": design,
+            "top": pinned_top,
+            "language": lang,
+            "data_width": data_width,
+            "addr_width": addr_width,
+            "parameters": parameters,
+            "logic_style": logic_style,
+            "reset_style": reset_style,
+            "clocking": clocking,
+            "protocol": protocol,
+            "throughput": throughput,
+            "constraints": constraints,
+            "feedback": feedback,
+        },
+        outputs={
+            "spec": spec_text,
+            "top": out_top,
+            "interface": str(result.get("interface", "")),
+            "signals_analysis": str(result.get("signals_analysis", "")),
+            "parameters": str(result.get("parameters", "")),
+            "timing": str(result.get("timing", "")),
+            "requirements": str(result.get("requirements", "")),
+            "assumptions": str(result.get("assumptions", "")),
+            "explanation": str(result.get("explanation", "")),
+            "improvements": improvements,
+            "status": "needs_review" if notes else "ok",
+            "errors": "",
+        },
+        extra_inputs=inputs,
+        extra_outputs=outputs,
+    )
+
+
+def _simple_spec_hdl_response(body: SpecHdlGenerateRequest, error: str = "") -> dict:
+    """Fallback: a port-complete spec_hdl block with no generated specification.
+
+    A revision keeps the spec it was given, for the reason ``_simple_code_hdl_response``
+    keeps the design: the app writes every port it is handed, so an empty ``spec``
+    here would destroy the contract the design and the tests were both written
+    from - a far worse outcome than a run that did nothing.
+    """
+    name = body.block_name.replace(" ", "_")
+    lang = _normalize_lang(body.language) or "systemverilog"
+    kept = (body.previous_spec or "").strip()
+    note = (
+        "The specification was returned unchanged: AI generation is not configured, "
+        "so the feedback could not be acted on."
+        if kept else ""
+    )
+    return _generated_envelope(
+        block_type="spec_hdl",
+        name=name,
+        category=body.category or "general",
+        description=(body.description or body.explanation or "").strip(),
+        inputs={
+            "explanation": (body.explanation or "").strip(),
+            "previous_code": (body.previous_code or "").strip(),
+            "top": body.top,
+            "language": lang,
+            "data_width": body.data_width,
+            "addr_width": body.addr_width,
+            "parameters": body.parameters,
+            "logic_style": body.logic_style,
+            "reset_style": body.reset_style,
+            "clocking": body.clocking,
+            "protocol": body.protocol,
+            "throughput": body.throughput,
+            "constraints": body.constraints,
+            "feedback": body.feedback,
+        },
+        outputs={
+            "spec": kept,
+            "top": (body.top or "").strip() or name,
+            "improvements": note,
+            "status": "error" if error else "",
+            "errors": error,
+        },
+        extra_inputs=body.inputs,
+        extra_outputs=body.outputs,
+    )
+
+
+@router.post("/generate/spec_hdl")
+async def generate_spec_hdl_block(
+    body: SpecHdlGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Generate or revise a spec_hdl block (the loop's specification) using AI.
+
+    Serves the manual UnifiedWindow creation path and the app's Run/Regenerate
+    buttons. Without a key, or on failure, returns a port-complete stub whose
+    ``errors``/``status`` ports say why - and which never blanks an existing
+    specification.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        log.info("blocks_generate_spec_hdl_fallback", reason="no_llm_key", block=body.block_name)
+        return _simple_spec_hdl_response(body, error="AI not configured")
+    try:
+        result = await generate_spec_hdl_payload(
+            block_name=body.block_name,
+            category=body.category,
+            description=body.description,
+            explanation=body.explanation,
+            previous_code=body.previous_code,
+            previous_spec=body.previous_spec,
+            language=body.language,
+            top=body.top,
+            data_width=body.data_width,
+            addr_width=body.addr_width,
+            parameters=body.parameters,
+            logic_style=body.logic_style,
+            reset_style=body.reset_style,
+            clocking=body.clocking,
+            protocol=body.protocol,
+            throughput=body.throughput,
+            constraints=body.constraints,
+            feedback=body.feedback,
+            inputs=body.inputs,
+            outputs=body.outputs,
+            model=body.run_llm_model or None,
+        )
+        if result is None:
+            return _simple_spec_hdl_response(body, error="AI not configured")
+        log.info(
+            "blocks_generate_spec_hdl_ok",
+            block=body.block_name, language=body.language,
+            revising=bool(body.feedback and body.previous_spec),
+        )
+        return result
+    except Exception as exc:
+        log.error("blocks_generate_spec_hdl_error", block=body.block_name, error=str(exc))
+        return _simple_spec_hdl_response(body, error=str(exc))
+
+
+# ── code_hdl block (AI-generated RTL derived from the spec) ──────────────────
+
+# One repair round when the first draft fails validation (truncated, wrong top,
+# unparsable interface). One, not many: a second failure means the spec is the
+# problem and the user should see it on the improvements port rather than pay for
+# another round of the same mistake.
+_CODE_HDL_REPAIR_ROUNDS = 1
+
+# Said on the improvements port when the design is VHDL. Not a silent empty
+# interface: Verilator is Verilog/SystemVerilog only, so a VHDL design cannot
+# reach a simulator, which means `feedback` never arrives and the fix loop never
+# runs. An empty `interface` with no explanation reads as a parser bug and sends
+# the user hunting for something that is not broken.
+_VHDL_LOOP_NOTE = (
+    "VHDL designs cannot be simulated by the verilator block (it is Verilog and "
+    "SystemVerilog only), so the testbench, simulation and fix loop are "
+    "unavailable for this language and the interface port is left empty."
+)
+
+
+def code_hdl_prompt_section(*, feedback: str, previous_code: str) -> str:
+    """[fix_rtl] when there is a design AND a failure to repair it against, else [create_code_hdl].
+
+    Simpler than :func:`code_prompt_section` because a code_hdl block is always
+    HDL — the language guard that stops a Python `code` block from reaching the
+    RTL fixer has nothing to guard here.
+    """
+    if not (feedback or "").strip() or not (previous_code or "").strip():
+        return _BLOCK_TYPE_SECTION["code_hdl"]
+    return _CODE_FIX_RTL_SECTION
+
+
+def build_code_hdl_gen_message(
+    *,
+    block_name: str,
+    language: str,
+    top: str,
+    spec: str,
+    constraints: str = "",
+    problems: list[str] | None = None,
+) -> str:
+    """Assemble the user message the [create_code_hdl] prompt expects."""
+    parts = [
+        f"Block name: {block_name}",
+        f"Hardware description language: {language or 'systemverilog'}",
+        f"Top module: {top or block_name}",
+        f"Spec (the contract the design must satisfy):\n{spec.strip()}",
+    ]
+    if constraints.strip():
+        parts.append(
+            "Constraints (reset style, interface conventions, target technology):\n"
+            f"{constraints.strip()}"
+        )
+    if problems:
+        parts.append(
+            "Your previous draft was REJECTED for these reasons; return a corrected design:\n- "
+            + "\n- ".join(problems)
+        )
+    return "\n\n".join(parts)
+
+
+async def generate_code_hdl_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    spec: str = "",
+    language: str = "systemverilog",
+    top: str = "",
+    constraints: str = "",
+    feedback: str = "",
+    previous_code: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Generate (or repair) a code_hdl block envelope via AI.
+
+    Fresh flow: [create_code_hdl] writes a synthesizable design from the spec →
+    :func:`validate_hdl_design` checks it parses, is not truncated, is named what
+    was asked and is not a testbench → one repair round on failure → residual
+    problems and any synthesizability warnings land on ``improvements``.
+
+    Repair flow (``feedback`` + ``previous_code``): the shared [fix_rtl] prompt,
+    validated by :func:`validate_rtl_fix`, which enforces what the prompt only
+    asks for — the module name and port list stay byte-identical.
+
+    ``top`` and ``interface`` are always parsed from the design that was actually
+    emitted, never read from the model's JSON: [fix_rtl]'s output contract has no
+    such keys, and a claim that disagreed with the source would be worse than no
+    claim at all.
+
+    Returns ``None`` when no LLM key is configured so callers fall back to a scaffold.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        return None
+
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+    lang = _normalize_lang(language) or "systemverilog"
+    if lang not in _HDL_LANGS:
+        raise ValueError(
+            f"'{language}' is not a hardware description language; "
+            f"code_hdl accepts {', '.join(sorted(_HDL_LANGS))}"
+        )
+    family = hdl_family(lang)
+
+    fixing = bool((feedback or "").strip() and (previous_code or "").strip())
+    spec_text = (spec or "").strip() or (description or "").strip()
+    if not fixing and not spec_text:
+        raise ValueError("a spec (or description) is required to generate a design")
+
+    section = code_hdl_prompt_section(feedback=feedback, previous_code=previous_code)
+    system_prompt = get_system_prompt(section)
+    if not system_prompt:
+        raise ValueError(f"{section} prompt section missing from Msg_config")
+
+    # On a repair the interface is frozen to whatever the failing design declared,
+    # so it is read from that design rather than from the (possibly stale) port.
+    top_name = (top or "").strip()
+    if fixing:
+        top_name = top_name or infer_top_module(previous_code)
+        frozen_ports = module_ports(previous_code, top_name)
+    else:
+        top_name = top_name or name
+
+    problems: list[str] = []
+    warnings: list[str] = []
+    result: dict = {}
+    code = ""
+    draft = previous_code
+    for attempt in range(_CODE_HDL_REPAIR_ROUNDS + 1):
+        if fixing:
+            user_message = build_code_fix_message(
+                block_name=name, language=lang, top=top_name, ports=frozen_ports,
+                previous_code=draft, feedback=feedback, description=spec_text,
+                problems=problems or None,
+            )
+        else:
+            user_message = build_code_hdl_gen_message(
+                block_name=name, language=lang, top=top_name, spec=spec_text,
+                constraints=constraints, problems=problems or None,
+            )
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
+        )
+        code = _strip_code_fences(str(result.get("code", "")))
+        if fixing:
+            problems, warnings = (validate_rtl_fix(code, previous_code, top_name), [])
+        else:
+            problems, warnings = validate_hdl_design(code, lang, top_name)
+        if not problems:
+            break
+        log.warning(
+            "code_hdl_validation_failed",
+            block=name, attempt=attempt, fixing=fixing, problems=problems,
+        )
+        draft = code or draft
+
+    # A repair that produced nothing must not blank the design it was meant to
+    # improve: the app overwrites every port it is handed, so an empty `code`
+    # here is data loss rather than a failed run.
+    if fixing and not code.strip():
+        code = previous_code
+
+    out_top, ports = design_interface(code, lang, top_name)
+    notes = list(problems)
+    if family == "vhdl":
+        notes.append(_VHDL_LOOP_NOTE)
+    notes.extend(warnings)
+
+    improvements = str(result.get("improvements", "")).strip()
+    if notes:
+        improvements = (
+            "Validation: " + "; ".join(notes) + ("\n" + improvements if improvements else "")
+        )
+
+    return _generated_envelope(
+        block_type="code_hdl",
+        name=name,
+        category=cat,
+        description=description,
+        inputs={
+            "spec": spec_text,
+            "language": lang,
+            "top": top_name,
+            "constraints": constraints,
+            "feedback": feedback,
+        },
+        outputs={
+            "code": code,
+            "top": out_top,
+            "interface": json.dumps(ports, ensure_ascii=False) if ports else "",
+            "language": lang,
+            "explanation": str(result.get("explanation", "")),
+            "improvements": improvements,
+            "status": "needs_review" if notes else "ok",
+            "errors": "",
+        },
+        extra_inputs=inputs,
+        extra_outputs=outputs,
+    )
+
+
+def _simple_code_hdl_response(body: CodeHdlGenerateRequest, error: str = "") -> dict:
+    """Fallback: a port-complete code_hdl block with no generated design.
+
+    A repair request keeps the design it was given. Without that the app would
+    overwrite a working design with an empty string every time the key is missing
+    — the run that was meant to improve it would destroy it instead.
+    """
+    name = body.block_name.replace(" ", "_")
+    lang = _normalize_lang(body.language) or "systemverilog"
+    kept = (body.previous_code or "").strip()
+    note = (
+        "The design was returned unchanged: HDL generation is not configured, so the "
+        "reported failures could not be acted on."
+        if kept else ""
+    )
+    out_top, ports = design_interface(kept, lang, body.top) if kept else (body.top, [])
+    return _generated_envelope(
+        block_type="code_hdl",
+        name=name,
+        category=body.category or "general",
+        description=(body.description or body.spec or "").strip(),
+        inputs={
+            "spec": (body.spec or "").strip(),
+            "language": lang,
+            "top": body.top,
+            "constraints": body.constraints,
+            "feedback": body.feedback,
+        },
+        outputs={
+            "code": kept,
+            "top": out_top,
+            "interface": json.dumps(ports, ensure_ascii=False) if ports else "",
+            "language": lang,
+            "improvements": note,
+            "status": "error" if error else "",
+            "errors": error,
+        },
+        extra_inputs=body.inputs,
+        extra_outputs=body.outputs,
+    )
+
+
+@router.post("/generate/code_hdl")
+async def generate_code_hdl_block(
+    body: CodeHdlGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Generate or repair a code_hdl block (spec-derived RTL) using AI, with fallback.
+
+    Serves the manual UnifiedWindow creation path and the app's Run/Regenerate
+    buttons, including the verify loop's repair leg. Without a key, or on failure,
+    returns a port-complete stub whose ``errors``/``status`` ports say why — and
+    which never blanks an existing design.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        log.info("blocks_generate_code_hdl_fallback", reason="no_llm_key", block=body.block_name)
+        return _simple_code_hdl_response(body, error="AI not configured")
+    try:
+        result = await generate_code_hdl_payload(
+            block_name=body.block_name,
+            category=body.category,
+            description=body.description,
+            spec=body.spec,
+            language=body.language,
+            top=body.top,
+            constraints=body.constraints,
+            feedback=body.feedback,
+            previous_code=body.previous_code,
+            inputs=body.inputs,
+            outputs=body.outputs,
+            model=body.run_llm_model or None,
+        )
+        if result is None:
+            return _simple_code_hdl_response(body, error="AI not configured")
+        log.info(
+            "blocks_generate_code_hdl_ok",
+            block=body.block_name, language=body.language,
+            fixing=bool(body.feedback and body.previous_code),
+        )
+        return result
+    except Exception as exc:
+        log.error("blocks_generate_code_hdl_error", block=body.block_name, error=str(exc))
+        return _simple_code_hdl_response(body, error=str(exc))
 
 
 # ── Scaffold-only blocks (no AI call, never need a key) ─────────────────────────
@@ -1295,7 +1969,94 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         seed_from_desc="spec",
         defaults={"framework": "cocotb", "style": "directed+random"},
     ),
+    # The RTL source of that same loop. Kept apart from the code block because a
+    # design is not a program: it needs a spec rather than a description, a module
+    # name every downstream block addresses it by, and synthesizability rules a
+    # general-purpose programming prompt has no reason to know about.
+    #   code_hdl.code -> testbench.rtl and verilator.rtl ; code_hdl.top -> both tops
+    #   verilator.failures -> code_hdl.feedback   (written by the client verify loop)
+    # "interface" is OUT only: it is the port list parsed from the design that was
+    # actually emitted, so it is evidence rather than a request. A pinned interface
+    # would be a second source of truth that nothing enforces; say it in
+    # "constraints" instead. "previous_code" is likewise absent — the repair path
+    # reads the block's own `code` output.
+    "code_hdl": _ScaffoldSpec(
+        category_based=True,
+        inputs=("spec", "language", "top", "constraints", "feedback"),
+        outputs=("code", "top", "interface", "language", "explanation",
+                 "improvements", "status", "errors"),
+        seed_map={"top": "top", "spec": "spec", "language": "language"},
+        seed_from_desc="spec",
+        defaults={"language": "systemverilog"},
+    ),
+    # The CONTRACT the two blocks above are both derived from. It exists because
+    # a design and its tests only agree about "correct" when they are handed the
+    # SAME spec, and because prose leaves the parameters a design always needs
+    # implicit — widths, clocking, reset polarity, combinational vs sequential.
+    #   spec_hdl.spec -> code_hdl.spec AND testbench.spec   (the same text, twice)
+    #   spec_hdl.top  -> code_hdl.top  AND testbench.top
+    #   code_hdl.code -> spec_hdl.previous_code
+    #   verilator.improvements_rtl (or failures) -> spec_hdl.feedback
+    # That last wire closes the OUTER loop: [fix_rtl] repairs a design against
+    # failing tests, but when a design and its tests disagree the fault is often
+    # the contract they were both written from, and nothing could repair that.
+    #
+    # "explanation" is in BOTH lists and is NOT echoed through — the rare
+    # exception to the rule the verilator comment states. The input is the rough
+    # human description this block starts from; the output is the plain-language
+    # summary of the finished spec. They are the same word for the same idea at
+    # opposite ends of the block, and renaming either to dodge the collision
+    # ("summary", "brief") would make the user hunt for the port that holds what
+    # they typed. Same for "top" and "parameters": pinned on the way in,
+    # resolved on the way out.
+    #
+    # "interface" is OUT only, as on code_hdl and for the same reason: a pinned
+    # interface would be a second source of truth nothing enforces. Here it is a
+    # PROPOSAL — what the spec implies — while code_hdl's is evidence parsed
+    # from the design it emitted.
+    "spec_hdl": _ScaffoldSpec(
+        category_based=True,
+        inputs=("explanation", "previous_code", "top", "language", "data_width",
+                "addr_width", "parameters", "logic_style", "reset_style",
+                "clocking", "protocol", "throughput", "constraints", "feedback"),
+        outputs=("spec", "top", "interface", "signals_analysis", "parameters",
+                 "timing", "requirements", "assumptions", "explanation",
+                 "improvements", "status", "errors"),
+        seed_map={"top": "top", "language": "language", "spec": "explanation"},
+        seed_from_desc="explanation",
+        defaults={"language": "systemverilog", "logic_style": "auto",
+                  "reset_style": "sync_active_high", "clocking": "single_clock"},
+    ),
 }
+
+
+# The memory block is the one type whose port shape depends on a PARAM rather than
+# only on the type: memory_mode picks between three quite different blocks. The
+# entry in _SCAFFOLD_SPECS above stays the snapshot shape so a mode-unaware caller
+# still gets a working block; _enrich_memory_block passes the right one of these as
+# a spec override. Mirrors UnifiedBlockCreationDialog::generateMemory().
+#   snapshot   — one "input"; the timestamped outputs are created at Run.
+#   sequential — the data inputs are user-named, so only the output is canonical.
+#   accumulate — "data" in; the record and its AI review out.
+MEMORY_MODES = ("snapshot", "sequential", "accumulate")
+
+_MEMORY_MODE_SPECS: dict[str, _ScaffoldSpec] = {
+    "snapshot": _ScaffoldSpec(category_based=False, inputs=("input",), outputs=()),
+    "sequential": _ScaffoldSpec(category_based=False, inputs=("input",), outputs=("output",)),
+    "accumulate": _ScaffoldSpec(
+        category_based=False,
+        inputs=("data",),
+        outputs=("accumulated_data", "analysis"),
+    ),
+}
+
+
+def memory_scaffold_spec(memory_mode: str) -> _ScaffoldSpec:
+    """The scaffold spec for a memory mode, falling back to snapshot."""
+    return _MEMORY_MODE_SPECS.get(
+        (memory_mode or "").strip().lower(), _MEMORY_MODE_SPECS["snapshot"]
+    )
+
 
 
 def _scaffold_port_path(
@@ -1316,6 +2077,7 @@ async def generate_scaffold_payload(
     inputs: list[str] | None = None,
     outputs: list[str] | None = None,
     seeds: dict[str, str] | None = None,
+    spec_override: _ScaffoldSpec | None = None,
 ) -> dict | None:
     """Build a scaffold-only block envelope (the ``tool_calls`` dict) — no AI call.
 
@@ -1325,8 +2087,12 @@ async def generate_scaffold_payload(
     command (e.g. ``{"address": "Eiffel Tower"}`` → the ``full_address`` port) so the block is
     ready to Run. Always succeeds and never needs an API key; returns ``None`` for an unknown
     type so the caller falls back to its own stub behavior.
+
+    ``spec_override`` replaces the registry entry for this one call. It exists for the
+    memory block, whose port shape is chosen by its ``memory_mode`` param rather than
+    by its type alone (see :func:`memory_scaffold_spec`).
     """
-    spec = _SCAFFOLD_SPECS.get(block_type)
+    spec = spec_override or _SCAFFOLD_SPECS.get(block_type)
     if spec is None:
         return None
 
@@ -1535,6 +2301,81 @@ async def run_selection_block(
         return result
     except Exception as exc:
         log.error("blocks_run_selection_error", block=body.block_name, error=str(exc))
+        raise
+
+
+# ---------------------------------------------------------------------------
+# Accumulate memory -> the analysis port
+# ---------------------------------------------------------------------------
+#
+# The one thing a memory block cannot do for itself.  Appending a value to a
+# growing record is file I/O, and the app does it locally before calling here --
+# what needs a model is the JUDGEMENT about that value: is it new, has it been
+# said already, does it disagree with something stored earlier.
+#
+# Server-side caps.  The app caps both halves before sending (see
+# kAccumulateMax* in Grafux-app/src/ui/diagram/blocks/aiblockexecutor.cpp); these
+# bound the message for a client that does not, so one Run of a long-lived block
+# cannot become a 400k-token call.  The record is kept from its TAIL because the
+# newest entries are what a repeat or a contradiction is most likely to be about.
+_ACCUMULATE_MAX_PREVIOUS_CHARS = 60_000
+_ACCUMULATE_MAX_NEW_CHARS = 20_000
+
+_ACCUMULATE_TRUNCATION_MARKER = "[earlier entries truncated]"
+
+
+def _accumulate_tail(text: str, limit: int) -> str:
+    """Keep the last ``limit`` characters, marking the cut when one was made."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return f"{_ACCUMULATE_TRUNCATION_MARKER}\n{text[-limit:]}"
+
+
+@router.post("/run/accumulate")
+async def run_accumulate_block(
+    body: RunAccumulateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Review one new value against a memory block's accumulated record."""
+    previous = _accumulate_tail(body.previous_accumulated, _ACCUMULATE_MAX_PREVIOUS_CHARS)
+    new_data = (body.new_data or "")[:_ACCUMULATE_MAX_NEW_CHARS]
+
+    system_prompt = (
+        "You review a growing record of information for a memory block on a visual "
+        "canvas. You are given the record AS IT STOOD BEFORE this run, and the ONE "
+        "new piece of data that has just been appended to it. Judge ONLY the new "
+        "data against the record.\n"
+        "Decide three things: what the new data adds or changes relative to the "
+        "record; whether it repeats something already there (the same fact, even if "
+        "worded differently -- not merely the same topic); and whether it "
+        "CONTRADICTS anything already there (the same subject given two "
+        "incompatible values, states or claims).\n"
+        f'If the record begins with "{_ACCUMULATE_TRUNCATION_MARKER}" you are seeing '
+        "only its most recent part: say what you can about what is visible and do "
+        "not claim that something is absent from the record.\n"
+        "Return ONLY valid JSON with three keys: "
+        '"analysis" (a few sentences on how the new data relates to the record), '
+        '"repeated" (boolean -- true only if the record already states this), and '
+        '"contradictions" (an array of strings, one per conflict, each naming the '
+        "earlier claim and the new one; an empty array when there is no conflict)."
+    )
+
+    user_message = (
+        f"Block: {body.block_name}\n"
+        f"What this memory block is for: {body.description or '(not stated)'}\n\n"
+        f"Accumulated record BEFORE this run:\n{previous or '(empty -- this is the first entry)'}\n\n"
+        f"New data just appended:\n{new_data}"
+    )
+
+    try:
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=body.run_llm_model
+        )
+        log.info("blocks_run_accumulate_ok", block=body.block_name)
+        return result
+    except Exception as exc:
+        log.error("blocks_run_accumulate_error", block=body.block_name, error=str(exc))
         raise
 
 
