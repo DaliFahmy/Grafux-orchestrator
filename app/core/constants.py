@@ -95,6 +95,38 @@ GROUNDABLE_BLOCK_TYPES: frozenset[str] = frozenset(
 )
 
 
+# ── Block agents ──────────────────────────────────────────────────────────────
+
+# block_type -> Msg_config section holding that block agent's OBJECTIVE: what
+# "done well" means for a block of this type, and the order it should work in.
+#
+# Deliberately sparse. Most blocks are served by the generic objective, and a
+# per-type section earns its place only where the type has a real procedure to
+# follow -- which today means the chip-design wedge, where the agent has to reason
+# about a spec, a design, its tests and a simulator that judges all three.
+# Everything absent here resolves to BLOCK_AGENT_DEFAULT_SECTION; see
+# app.modules.session.block_agent.objective_section().
+BLOCK_AGENT_DEFAULT_SECTION = "block_agent_default"
+
+BLOCK_AGENT_SECTION: dict[str, str] = {
+    BlockType.SPEC_HDL.value: "block_agent_spec_hdl",
+    BlockType.CODE_HDL.value: "block_agent_code_hdl",
+    BlockType.TESTBENCH.value: "block_agent_testbench",
+    BlockType.VERILATOR.value: "block_agent_verilator",
+}
+
+# Block types whose Run provisions a cloud pod: real money, and minutes to hours
+# of wall clock (an OpenROAD place-and-route can take 30-90 minutes). A block
+# agent may run these, but they are metered separately from ordinary runs so a
+# team of agents cannot provision a pod each -- see AgentPolicy.max_expensive_runs.
+EXPENSIVE_BLOCK_TYPES: frozenset[str] = frozenset({
+    BlockType.VERILATOR.value,
+    BlockType.YOSYS.value,
+    BlockType.OPENROAD.value,
+    BlockType.GPU.value,
+})
+
+
 # ── Workflow tool routing ──────────────────────────────────────────────────────
 
 # Graph node names the agent's tool calls are dispatched to.

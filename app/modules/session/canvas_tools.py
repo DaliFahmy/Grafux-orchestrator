@@ -1,8 +1,25 @@
-"""Gemini Live function declarations and mapping to Grafux canvas actions."""
+"""Canvas tool declarations and their mapping to Grafux canvas actions.
+
+These declarations are the SINGLE SOURCE for what an AI may do to a canvas.
+Every consumer derives from them rather than restating them:
+
+* Gemini Live   -> ``get_live_tools_config()`` (the native declaration shape);
+* OpenAI        -> ``to_openai_tools()``;
+* Anthropic     -> ``to_anthropic_tools()`` (the block agents);
+* the canvas    -> ``function_call_to_action()``, whose output is applied by the
+  Qt client's ``BlockAgentController``.
+
+Adding a tool means adding it here once. The one remaining restatement is the
+``##ACTIONS##`` grammar in ``Msg_config [chat_assistant]``, which serves the
+legacy chat path only -- new work goes through tool calls.
+"""
 
 from __future__ import annotations
 
 from typing import Any
+
+from app.core.llm import to_anthropic_tools as _to_anthropic_tools
+from app.core.llm import to_openai_tools as _to_openai_tools
 
 
 def _str_prop(description: str) -> dict[str, Any]:
@@ -304,9 +321,90 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
 ]
 
 
+# Declarations that coordinate AGENTS rather than touch the canvas. Kept apart
+# from CANVAS_FUNCTION_DECLARATIONS because the voice/chat paths must not see
+# them -- there is no agent for them to talk to.
+AGENT_COORDINATION_DECLARATIONS: list[dict[str, Any]] = [
+    _func(
+        "post_note",
+        "Share a short finding with the other active block agents. Non-blocking: "
+        "it does not wait for a reply. Use it to say what you changed and why, so "
+        "no one repeats your work.",
+        {
+            "note": _str_prop("What you want the other agents to know."),
+            "to_block": _str_prop(
+                "Optional block name to address this to. Omit to tell everyone."
+            ),
+        },
+        required=["note"],
+    ),
+    _func(
+        "request_agent",
+        "Ask the agent of ANOTHER block to do something on its own block. This is "
+        "the only way to change a block that has its own active agent.",
+        {
+            "target_block": _str_prop("Block name whose agent should act."),
+            "request": _str_prop("What you need it to do, and the evidence for why."),
+            "wait": _str_prop(
+                "'true' to wait for its reply before continuing, 'false' to carry on."
+            ),
+        },
+        required=["target_block", "request"],
+    ),
+    _func(
+        "ask_user",
+        "Ask the user a question and wait for their answer. Use it when you need a "
+        "decision only they can make, or when a rule requires their confirmation.",
+        {"question": _str_prop("The question, in one or two plain sentences.")},
+        required=["question"],
+    ),
+    _func(
+        "finish",
+        "Declare your work on this block done and stop. Always end with this.",
+        {
+            "summary": _str_prop("What you changed and what you verified."),
+            "goal_met": _str_prop("'true' if the objective is met, otherwise 'false'."),
+            "blocking": _str_prop(
+                "If not met, the one thing standing in the way."
+            ),
+        },
+        required=["summary", "goal_met"],
+    ),
+]
+
+
+def _by_name(names: list[str] | None) -> list[dict[str, Any]]:
+    """Declarations filtered to ``names`` (all canvas + agent tools when None).
+
+    Order follows the declaration lists, not the caller's ``names``, so the tool
+    array is byte-stable across steps -- an unstable tool order silently kills
+    prompt caching, which renders ``tools`` before ``system``.
+    """
+    everything = CANVAS_FUNCTION_DECLARATIONS + AGENT_COORDINATION_DECLARATIONS
+    if names is None:
+        return list(everything)
+    wanted = set(names)
+    return [d for d in everything if d["name"] in wanted]
+
+
+def to_declarations(names: list[str] | None = None) -> list[dict[str, Any]]:
+    """Canvas/agent declarations in the neutral shape ``call_llm_tools`` takes."""
+    return _by_name(names)
+
+
 def get_live_tools_config() -> list[dict[str, Any]]:
     """Tools list for Gemini Live connect config."""
     return [{"function_declarations": CANVAS_FUNCTION_DECLARATIONS}]
+
+
+def to_openai_tools(names: list[str] | None = None) -> list[dict[str, Any]]:
+    """Canvas/agent declarations in OpenAI ``tools=`` shape."""
+    return _to_openai_tools(_by_name(names))
+
+
+def to_anthropic_tools(names: list[str] | None = None) -> list[dict[str, Any]]:
+    """Canvas/agent declarations in Anthropic ``tools=`` shape."""
+    return _to_anthropic_tools(_by_name(names))
 
 
 def _default_target_block(active_blocks: list[Any]) -> str:

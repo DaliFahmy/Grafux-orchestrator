@@ -77,7 +77,11 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_live_model: str = "gemini-3.1-flash-live-preview"
     anthropic_api_key: str = ""               # env: ANTHROPIC_API_KEY
-    anthropic_model: str = "claude-opus-4-8"  # default Claude model for routing
+    # Default Claude model. Used when a caller asks for Anthropic without naming a
+    # version -- notably a block agent whose model dropdown is unset. NOT the
+    # default for an empty model id: that stays on openai_model, which is the
+    # non-regression guarantee for every caller that sends no model at all.
+    anthropic_model: str = "claude-opus-5"
 
     # ── External Services ─────────────────────────────────────────────────────
     e2b_api_key: str = ""

@@ -129,7 +129,13 @@ async def test_read_timeout_is_graceful(monkeypatch):
     sess, ws = _session()
     # No client reply ever arrives → wait_for times out → found=False.
     result = await sess._request_port_content("A", "output", "p", timeout=0.05)
-    assert result == {"found": False, "content": ""}
+    # The contract callers rely on: nothing was found, and there is no content to
+    # read. The reply also carries ok/detail now that every client round-trip
+    # shares one shape, so this asserts the contract rather than the whole dict.
+    assert result["found"] is False
+    assert result["content"] == ""
+    assert result["ok"] is False
+    assert "did not respond" in result["detail"]
 
 
 @pytest.mark.asyncio

@@ -12,32 +12,20 @@ import json
 from typing import Any
 
 from app.core.logging import get_logger
+from app.modules.session.canvas_tools import to_openai_tools
 
 log = get_logger("session.canvas_context")
 
 
 # OpenAI tool schema for the on-demand port read (text path). Mutations stay on
 # the ##ACTIONS## tag; only reads are a real round-trip tool.
-READ_PORT_TOOL: dict[str, Any] = {
-    "type": "function",
-    "function": {
-        "name": "read_port_value",
-        "description": (
-            "Read the FULL current content of a block's input or output port file. "
-            "Use this when the user asks what a port or block contains, to summarize or "
-            "explain port data, or when the canvas context marks a value as truncated."
-        ),
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "target_block": {"type": "string", "description": "Block name on the canvas."},
-                "direction": {"type": "string", "description": "Must be 'input' or 'output'."},
-                "port_name": {"type": "string", "description": "Port name (snake_case)."},
-            },
-            "required": ["target_block", "direction", "port_name"],
-        },
-    },
-}
+#
+# DERIVED, not restated. This used to be a hand-written copy of the declaration
+# in canvas_tools.py, and the two had already drifted -- the copy demanded
+# target_block, the original made it optional so a model focused on one block
+# need not name it. Deriving keeps the text path, the voice path and the block
+# agents describing the same tool.
+READ_PORT_TOOL: dict[str, Any] = to_openai_tools(["read_port_value"])[0]
 
 
 def format_library_entry(entry: dict[str, Any]) -> str:
