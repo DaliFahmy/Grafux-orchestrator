@@ -75,6 +75,7 @@ def _capture():
         return {
             "design": "- `wr_ptr` wraps one cycle early (test_wrap_around)",
             "tests": "- Add a test that writes while `full` is high",
+            "spec": "- REQ-3 does not say whether `full` blocks a same-cycle write",
             "summary": "2 tests fail on the pointer wrap",
         }
 
@@ -95,10 +96,25 @@ def test_improve_run_section_exists_and_covers_every_kind():
         assert kind in prompt, f"prompt gives no lens for kind={kind}"
 
 
-def test_improve_run_section_declares_the_three_output_keys():
+def test_improve_run_section_declares_the_four_output_keys():
     prompt = get_system_prompt("improve_run")
-    for key in ("design", "tests", "summary"):
+    for key in ("design", "tests", "spec", "summary"):
         assert f'"{key}"' in prompt
+
+
+def test_improve_run_keeps_the_spec_bucket_off_the_kinds_with_no_contract():
+    # openroad and device have no spec_hdl block upstream, so a spec bullet for
+    # them would be advice about a file that does not exist.
+    prompt = get_system_prompt("improve_run")
+    assert "no contract block on the canvas" in prompt
+
+
+def test_improve_run_allows_an_empty_spec_bucket():
+    # The one bucket that is CORRECTLY empty most of the time - the general
+    # "never return empty buckets" rule must carve it out, or every run reports
+    # a contract fault and the outer loop revises the spec on nothing.
+    prompt = get_system_prompt("improve_run")
+    assert '"spec" is the one exception' in prompt
 
 
 def test_improve_run_forbids_an_empty_review_of_a_passing_run():
@@ -166,8 +182,8 @@ def test_oversized_evidence_is_capped_and_drops_the_least_specific_first():
         run={
             "failures": "test_wrap_around: KEEP THIS",
             "results": '{"total": 6}',
-            "log": "L" * 90_000,
-            "sim_output": "S" * 90_000,
+            "log": "L" * 120_000,
+            "sim_output": "S" * 120_000,
         },
     )
     assert len(msg) <= blocks_router._IMPROVEMENTS_MAX_CHARS
@@ -191,7 +207,7 @@ def test_hard_truncation_marks_itself_when_evidence_cannot_be_dropped():
 # ── payload + endpoint ────────────────────────────────────────────────────────
 
 
-def test_payload_returns_the_three_buckets(monkeypatch):
+def test_payload_returns_the_four_buckets(monkeypatch):
     fake_llm, seen = _capture()
     monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
     monkeypatch.setattr(blocks_router, "_call_openai_json", fake_llm)
@@ -199,9 +215,10 @@ def test_payload_returns_the_three_buckets(monkeypatch):
     out = _run(blocks_router.generate_improvements_payload(
         block_name="fifo_sim", kind="verilator", verdict="failed", run=FAILING_RUN,
     ))
-    assert set(out) == {"design", "tests", "summary"}
+    assert set(out) == {"design", "tests", "spec", "summary"}
     assert "wr_ptr" in out["design"]
     assert "full" in out["tests"]
+    assert "REQ-3" in out["spec"]
     assert seen["system"] == get_system_prompt("improve_run")
     assert "VERDICT: failed" in seen["user"]
 
@@ -274,13 +291,13 @@ def test_unknown_kind_is_accepted_not_rejected(monkeypatch):
 
 def test_missing_model_keys_become_empty_strings(monkeypatch):
     async def sparse(*args, **kwargs):
-        return {"design": "- do the thing"}      # no "tests", no "summary"
+        return {"design": "- do the thing"}      # no "tests"/"spec"/"summary"
 
     monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
     monkeypatch.setattr(blocks_router, "_call_openai_json", sparse)
 
     out = _run(blocks_router.generate_improvements_payload(block_name="b", kind="verilator"))
-    assert out == {"design": "- do the thing", "tests": "", "summary": ""}
+    assert out == {"design": "- do the thing", "tests": "", "spec": "", "summary": ""}
 
 
 def test_run_llm_model_is_forwarded(monkeypatch):
@@ -297,7 +314,7 @@ def test_run_llm_model_is_forwarded(monkeypatch):
 # ── the port contract this endpoint writes into ───────────────────────────────
 
 
-def test_verilator_scaffold_declares_both_improvement_ports():
+def test_verilator_scaffold_declares_all_three_improvement_ports():
     """Mirrors EdaPorts::kVerilatorOutputs in
     Grafux-app/src/clients/grafux-devices/edaports.h. A drift here means an
     AI-created block and a toolbar-created block get different ports.
@@ -305,9 +322,26 @@ def test_verilator_scaffold_declares_both_improvement_ports():
     outputs = blocks_router._SCAFFOLD_SPECS["verilator"].outputs
     assert "improvements_rtl" in outputs
     assert "improvements_test" in outputs
+    # The contract advice, and the outer loop's return leg into spec_hdl.feedback.
+    assert "improvements_spec" in outputs
     # The single generic port is GONE on verilator - it was dead, and keeping it
-    # beside the two real ones would leave a third port that never fills.
+    # beside the three real ones would leave a fourth port that never fills.
     assert "improvements" not in outputs
+
+
+def test_verilator_scaffold_takes_the_spec_as_a_wire_only_input():
+    """`spec` is evidence for the review, never a run parameter.
+
+    It must be an input port (so spec_hdl.spec can be wired in) and must NOT be
+    seeded or defaulted: a seeded verilator spec is a SECOND copy of the
+    contract, and a review citing a contract nobody implemented is worse than
+    no review.
+    """
+    spec = blocks_router._SCAFFOLD_SPECS["verilator"]
+    assert "spec" in spec.inputs
+    assert "spec" not in spec.outputs        # never echoed through
+    assert "spec" not in (spec.seed_map or {}).values()
+    assert "spec" not in (spec.defaults or {})
 
 
 def test_openroad_and_devices_keep_the_single_improvements_port():

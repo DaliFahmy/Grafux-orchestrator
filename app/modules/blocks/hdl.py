@@ -596,3 +596,72 @@ def validate_spec(
                     + "); decide which one is wrong before regenerating either"
                 )
     return (problems, warnings)
+
+
+# ── The whole contract as one document ───────────────────────────────────────
+#
+# A spec_hdl block scatters its answer over a dozen ports because each of them
+# is separately WIRABLE: the design block wants `spec`, the testbench wants
+# `requirements`, a reviewer wants `assumptions`. Nothing was left for the
+# reader who wants all of it — to paste into a review, to hand to a block that
+# takes one blob of prose, or simply to read on the canvas without opening
+# seven files.
+#
+# `full_spec` is that reader's port, and it is composed HERE rather than asked
+# of the model, for the reason `accumulated_data` is assembled client-side on
+# the memory block: a value derived from values already in hand cannot be lost
+# by an LLM failure, cannot contradict the ports it summarises, and costs
+# nothing. It is a VIEW, never a second source of truth — if the two ever
+# disagree the sibling ports win.
+#
+# `status` and `errors` are deliberately absent. "needs_review" and "AI not
+# configured" are bookkeeping about the run; this document is the contract.
+_FULL_SPEC_SECTIONS: tuple[tuple[str, str], ...] = (
+    ("top", "Top Module"),
+    ("explanation", "Overview"),
+    ("spec", "Specification"),
+    ("requirements", "Requirements"),
+    ("interface", "Interface"),
+    ("signals_analysis", "Signals Analysis"),
+    ("parameters", "Parameters"),
+    ("timing", "Timing"),
+    ("assumptions", "Assumptions"),
+    ("improvements", "Open Questions"),
+)
+
+# Sections whose body is machine syntax rather than prose, and the fence
+# language to wrap them in so a reader (human or model) cannot mistake where
+# the JSON stops.
+_FULL_SPEC_FENCED = {"interface": "json"}
+
+
+def compose_full_spec(outputs: dict[str, str]) -> str:
+    """Every substantive spec_hdl output as one markdown document.
+
+    ``outputs`` is the port-name -> content mapping the block is about to
+    return; keys it does not carry are simply absent from the document. An
+    empty port contributes NOTHING - not even its heading - because a page of
+    bare headings reads like a generation failure rather than a spec that had
+    no assumptions to record.
+
+    Returns ``""`` when the only thing on hand is the module name, so the
+    no-key fallback writes an empty port rather than a title page: ``top``
+    alone is a block that has not been run, not a specification.
+    """
+    sections: list[str] = []
+    substantive = False
+    for port, heading in _FULL_SPEC_SECTIONS:
+        body = str(outputs.get(port, "") or "").strip()
+        if not body:
+            continue
+        if port != "top":
+            substantive = True
+        fence = _FULL_SPEC_FENCED.get(port)
+        if fence:
+            body = f"```{fence}\n{body}\n```"
+        sections.append(f"## {heading}\n{body}")
+    if not substantive:
+        return ""
+    top = str(outputs.get("top", "") or "").strip()
+    title = f"# Full Specification: {top}" if top else "# Full Specification"
+    return "\n\n".join([title, *sections]) + "\n"

@@ -181,8 +181,9 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "apps via Composio (set 'connections' to the apps it should act on).\n"
                 "- devices: run a command/code on a connected hardware device.\n"
                 "- memory: remember values from other blocks - snapshot them, step "
-                "through them in sequence, or accumulate them into one growing record "
-                "with an AI review of each addition (memory_mode).\n"
+                "through them in sequence, accumulate them into one growing record, "
+                "or merge several inputs at once into one combined output, the last "
+                "two with an AI review (memory_mode).\n"
                 "- selection: pick one of several inputs by criteria.\n"
                 "- filter: filter text/image/video input by criteria.\n"
                 "- verilator: simulate or lint a Verilog/SystemVerilog design and "
@@ -233,8 +234,13 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "run emits the next of several inputs, wrapping around) or "
                 "'accumulate' (each run appends the 'data' input to a growing "
                 "'accumulated_data' record and writes an AI review of how the new "
-                "data relates to what is already there onto 'analysis'). Defaults to "
-                "snapshot; ignored for other types."
+                "data relates to what is already there onto 'analysis') or 'merge' "
+                "(each run combines EVERY connected input at once into 'merged_data' "
+                "and writes an AI review of how those inputs agree, conflict and "
+                "complement each other onto 'analysis'; the block grows a new input "
+                "port whenever the last one is connected). Use 'accumulate' to build "
+                "up one source over time and 'merge' to bring several sources "
+                "together in one go. Defaults to snapshot; ignored for other types."
             ),
             "gpu_model": _str_prop(
                 "For a 'gpu' block: the GPU model to provision (e.g. 'NVIDIA A100'). "
@@ -368,6 +374,12 @@ def function_call_to_action(
             # testbench / code_hdl seed: the spec the tests and the design share,
             # and the rough explanation the spec_hdl block makes rigorous.
             "spec", "explanation",
+            # The two params that pick a SUBTYPE. Both are declared above, and
+            # leaving them out here does not fail -- the enricher normalises a
+            # missing value to the default, so every voice-created memory block
+            # silently became a snapshot one whatever the user asked for. Anything
+            # declared to the model belongs in this tuple.
+            "memory_mode", "filter_type",
         ):
             if key in args and args[key] is not None:
                 action[key] = args[key]

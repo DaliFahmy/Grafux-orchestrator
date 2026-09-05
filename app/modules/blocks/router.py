@@ -24,6 +24,7 @@ from app.core.llm import _strip_code_fences, call_llm_json, call_llm_text
 from app.core.logging import get_logger
 from app.dependencies import CurrentUser
 from app.modules.blocks.hdl import (
+    compose_full_spec,
     design_interface,
     hdl_family,
     infer_top_module,
@@ -38,10 +39,12 @@ from app.modules.blocks.schemas import (
     CodeHdlGenerateRequest,
     ImageGenerateRequest,
     ImprovementsRequest,
+    MergeInputItem,
     RegenerateFilterRequest,
     RegenerateToolRequest,
     RunAccumulateRequest,
     RunFilterRequest,
+    RunMergeRequest,
     RunSearchRequest,
     RunSelectionRequest,
     SpecHdlGenerateRequest,
@@ -1358,6 +1361,24 @@ async def generate_spec_hdl_payload(
 
     out_top = pinned_top or str(result.get("top", "")).strip() or name
 
+    # Built from the port values themselves, one statement after they are
+    # decided, so the document and the ports it summarises can never drift.
+    spec_outputs = {
+        "spec": spec_text,
+        "top": out_top,
+        "interface": str(result.get("interface", "")),
+        "signals_analysis": str(result.get("signals_analysis", "")),
+        "parameters": str(result.get("parameters", "")),
+        "timing": str(result.get("timing", "")),
+        "requirements": str(result.get("requirements", "")),
+        "assumptions": str(result.get("assumptions", "")),
+        "explanation": str(result.get("explanation", "")),
+        "improvements": improvements,
+        "status": "needs_review" if notes else "ok",
+        "errors": "",
+    }
+    spec_outputs["full_spec"] = compose_full_spec(spec_outputs)
+
     return _generated_envelope(
         block_type="spec_hdl",
         name=name,
@@ -1379,23 +1400,28 @@ async def generate_spec_hdl_payload(
             "constraints": constraints,
             "feedback": feedback,
         },
-        outputs={
-            "spec": spec_text,
-            "top": out_top,
-            "interface": str(result.get("interface", "")),
-            "signals_analysis": str(result.get("signals_analysis", "")),
-            "parameters": str(result.get("parameters", "")),
-            "timing": str(result.get("timing", "")),
-            "requirements": str(result.get("requirements", "")),
-            "assumptions": str(result.get("assumptions", "")),
-            "explanation": str(result.get("explanation", "")),
-            "improvements": improvements,
-            "status": "needs_review" if notes else "ok",
-            "errors": "",
-        },
+        outputs=spec_outputs,
         extra_inputs=inputs,
         extra_outputs=outputs,
     )
+
+
+def _simple_spec_hdl_outputs(spec: str, top: str, note: str, error: str) -> dict[str, str]:
+    """The fallback stub's output ports, ``full_spec`` composed from the rest.
+
+    A revision that kept its specification must keep the document too: the app
+    overwrites every port it is handed, so a blank ``full_spec`` beside a
+    preserved ``spec`` would read as a spec that had lost half of itself.
+    """
+    outputs = {
+        "spec": spec,
+        "top": top,
+        "improvements": note,
+        "status": "error" if error else "",
+        "errors": error,
+    }
+    outputs["full_spec"] = compose_full_spec(outputs)
+    return outputs
 
 
 def _simple_spec_hdl_response(body: SpecHdlGenerateRequest, error: str = "") -> dict:
@@ -1435,13 +1461,7 @@ def _simple_spec_hdl_response(body: SpecHdlGenerateRequest, error: str = "") -> 
             "constraints": body.constraints,
             "feedback": body.feedback,
         },
-        outputs={
-            "spec": kept,
-            "top": (body.top or "").strip() or name,
-            "improvements": note,
-            "status": "error" if error else "",
-            "errors": error,
-        },
+        outputs=_simple_spec_hdl_outputs(kept, (body.top or "").strip() or name, note, error),
         extra_inputs=body.inputs,
         extra_outputs=body.outputs,
     )
@@ -1911,14 +1931,20 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
     # runs in the app, and the server runs exactly one simulation per request.
     "verilator": _ScaffoldSpec(
         category_based=True,
-        inputs=("rtl", "testbench", "sva", "top", "mode", "simulator", "tests",
-                "seed", "collect_coverage", "max_iterations", "defines",
+        # `spec` is deliberately absent from seed_map and defaults: it is
+        # WIRE-ONLY.  Seeding it would put a second copy of the contract on the
+        # canvas, and a verilator block reviewing a spec that disagrees with the
+        # one code_hdl and testbench were written from would cite a contract
+        # nobody implemented.  One spec text, every reader.
+        inputs=("spec", "rtl", "testbench", "sva", "top", "mode", "simulator",
+                "tests", "seed", "collect_coverage", "max_iterations", "defines",
                 "include_dirs", "files", "trace", "sim_args", "verilator_flags",
                 "timeout", "instance_type", "image", "api_keys"),
         outputs=("status", "passed", "results", "failures", "coverage",
                  "coverage_report", "iterations", "sim_output", "lint", "errors",
                  "warnings", "waveform", "rtl", "top", "log", "artifacts",
-                 "eda_id", "cost", "improvements_rtl", "improvements_test"),
+                 "eda_id", "cost", "improvements_rtl", "improvements_test",
+                 "improvements_spec"),
         seed_map={"top": "top"},
         defaults={"mode": "sim", "trace": "1", "timeout": "900",
                   "simulator": "verilator", "collect_coverage": "1",
@@ -1996,7 +2022,11 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
     #   spec_hdl.spec -> code_hdl.spec AND testbench.spec   (the same text, twice)
     #   spec_hdl.top  -> code_hdl.top  AND testbench.top
     #   code_hdl.code -> spec_hdl.previous_code
-    #   verilator.improvements_rtl (or failures) -> spec_hdl.feedback
+    #   verilator.improvements_spec -> spec_hdl.feedback
+    #     (`failures` or `improvements_rtl` still work, but they are design
+    #      advice pressed into service as contract advice: [create_spec_hdl]
+    #      revises BY CLAUSE, so it then has to guess which clause each bullet
+    #      implicates.)
     # That last wire closes the OUTER loop: [fix_rtl] repairs a design against
     # failing tests, but when a design and its tests disagree the fault is often
     # the contract they were both written from, and nothing could repair that.
@@ -2019,9 +2049,9 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         inputs=("explanation", "previous_code", "top", "language", "data_width",
                 "addr_width", "parameters", "logic_style", "reset_style",
                 "clocking", "protocol", "throughput", "constraints", "feedback"),
-        outputs=("spec", "top", "interface", "signals_analysis", "parameters",
-                 "timing", "requirements", "assumptions", "explanation",
-                 "improvements", "status", "errors"),
+        outputs=("spec", "full_spec", "top", "interface", "signals_analysis",
+                 "parameters", "timing", "requirements", "assumptions",
+                 "explanation", "improvements", "status", "errors"),
         seed_map={"top": "top", "language": "language", "spec": "explanation"},
         seed_from_desc="explanation",
         defaults={"language": "systemverilog", "logic_style": "auto",
@@ -2031,14 +2061,21 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
 
 
 # The memory block is the one type whose port shape depends on a PARAM rather than
-# only on the type: memory_mode picks between three quite different blocks. The
+# only on the type: memory_mode picks between four quite different blocks. The
 # entry in _SCAFFOLD_SPECS above stays the snapshot shape so a mode-unaware caller
 # still gets a working block; _enrich_memory_block passes the right one of these as
 # a spec override. Mirrors UnifiedBlockCreationDialog::generateMemory().
 #   snapshot   — one "input"; the timestamped outputs are created at Run.
 #   sequential — the data inputs are user-named, so only the output is canonical.
 #   accumulate — "data" in; the record and its AI review out.
-MEMORY_MODES = ("snapshot", "sequential", "accumulate")
+#   merge      — several inputs at once; the combination and its AI review out.
+#
+# merge is the ONE spec in this file that is only a STARTING shape: its input ports
+# auto-grow on the client (a new empty input appears whenever the last one is
+# connected), so a merge block on a canvas will have more inputs than this says.
+# Nothing here needs to track that -- the client owns the growth and persists the
+# resulting port set with the block.
+MEMORY_MODES = ("snapshot", "sequential", "accumulate", "merge")
 
 _MEMORY_MODE_SPECS: dict[str, _ScaffoldSpec] = {
     "snapshot": _ScaffoldSpec(category_based=False, inputs=("input",), outputs=()),
@@ -2047,6 +2084,11 @@ _MEMORY_MODE_SPECS: dict[str, _ScaffoldSpec] = {
         category_based=False,
         inputs=("data",),
         outputs=("accumulated_data", "analysis"),
+    ),
+    "merge": _ScaffoldSpec(
+        category_based=False,
+        inputs=("input_1", "input_2"),
+        outputs=("merged_data", "analysis"),
     ),
 }
 
@@ -2379,6 +2421,119 @@ async def run_accumulate_block(
         raise
 
 
+# ---------------------------------------------------------------------------
+# Merge memory -> the analysis port
+# ---------------------------------------------------------------------------
+#
+# The same division of labour as accumulate: the app builds the labelled
+# combination and writes it to "merged_data" locally BEFORE calling here, so a
+# failed model call costs the commentary and never the data.  What needs a model
+# is the reading ACROSS the inputs -- where several things that arrived together
+# agree, conflict, or complete each other.
+#
+# Server-side caps.  The app caps too (kMergeMax* in aiblockexecutor.cpp); these
+# bound the message for a client that does not.  Note the contrast with accumulate:
+# there the record is kept from its TAIL, because the newest entries are what a
+# repeat is most likely to be about.  Here each input is a whole DOCUMENT that
+# arrived on its own wire, and its opening is the representative sample -- so
+# merge keeps HEADS.  Do not "fix" this into consistency with _accumulate_tail.
+_MERGE_MAX_INPUTS = 24
+_MERGE_MAX_PER_INPUT_CHARS = 20_000
+_MERGE_MAX_TOTAL_CHARS = 80_000
+
+_MERGE_TRUNCATION_MARKER = "[input truncated]"
+
+
+def _merge_head(text: str, limit: int) -> str:
+    """Keep the first ``limit`` characters, marking the cut when one was made."""
+    text = text or ""
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n{_MERGE_TRUNCATION_MARKER}"
+
+
+def _merge_sections(inputs: list[MergeInputItem]) -> tuple[str, int]:
+    """Render the inputs as ``--- port ---`` sections, capped; also count drops.
+
+    The section markers are the ones the client already wrote into "merged_data",
+    so a citation in the review points at something the user can see on the block.
+    """
+    sections: list[str] = []
+    used = 0
+    dropped = 0
+
+    for index, item in enumerate(inputs):
+        if index >= _MERGE_MAX_INPUTS:
+            dropped = len(inputs) - _MERGE_MAX_INPUTS
+            break
+        remaining = _MERGE_MAX_TOTAL_CHARS - used
+        if remaining <= 0:
+            dropped = len(inputs) - index
+            break
+        text = _merge_head(item.text, min(_MERGE_MAX_PER_INPUT_CHARS, remaining))
+        used += len(text)
+        sections.append(f"--- {item.port} ---\n{text}")
+
+    return "\n\n".join(sections), dropped
+
+
+@router.post("/run/merge")
+async def run_merge_block(
+    body: RunMergeRequest,
+    user: CurrentUser,
+) -> dict:
+    """Review several inputs a memory block combined in one run."""
+    sections, dropped = _merge_sections(body.inputs)
+
+    system_prompt = (
+        "You review several pieces of information that arrived at a memory block on "
+        "a visual canvas AT THE SAME TIME. They are PEERS: none is newer or more "
+        "authoritative than another, and each is labelled with the input port it "
+        "came from.\n"
+        "Decide three things. Where do the inputs AGREE -- the same fact stated by "
+        "two or more of them, even if worded differently, not merely the same "
+        "topic. Where do they CONFLICT -- the same subject given two incompatible "
+        "values, states or claims. Where do they COMPLEMENT each other -- one "
+        "supplies what another is missing, so together they say more than either "
+        "does alone.\n"
+        "Always name the input ports you are talking about. If an input ends with "
+        f'"{_MERGE_TRUNCATION_MARKER}" you are seeing only its opening: say what you '
+        "can about what is visible and do not claim that something is absent.\n"
+        "Return ONLY valid JSON with four keys: "
+        '"analysis" (a few sentences on what these inputs together amount to), '
+        '"agreements" (an array of strings), '
+        '"conflicts" (an array of strings, each naming the ports and the '
+        'incompatible claims), and '
+        '"complements" (an array of strings, each naming the port that supplies '
+        "what another lacks). Use empty arrays, not prose, for a category with "
+        "nothing in it."
+    )
+
+    dropped_note = (
+        f"\n\n({dropped} further input(s) were too large to include in this review.)"
+        if dropped
+        else ""
+    )
+
+    user_message = (
+        f"Block: {body.block_name}\n"
+        f"What this memory block is for: {body.description or '(not stated)'}\n\n"
+        f"Inputs merged in this run:\n"
+        f"{sections or '(no connected inputs had any content)'}"
+        f"{dropped_note}"
+    )
+
+    try:
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=body.run_llm_model
+        )
+        log.info("blocks_run_merge_ok", block=body.block_name, inputs=len(body.inputs))
+        return result
+    except Exception as exc:
+        log.error("blocks_run_merge_error", block=body.block_name, error=str(exc))
+        raise
+
+
 @router.post("/run/filter")
 async def run_filter_block(
     body: RunFilterRequest,
@@ -2434,18 +2589,32 @@ async def run_filter_block(
 # Server-side belt-and-braces cap.  The app caps every field before sending
 # (EdaImprovements::buildRequestBody); this bounds the whole message so a client
 # that does not cap cannot turn one finished run into a 400k-token call.
-_IMPROVEMENTS_MAX_CHARS = 80_000
+_IMPROVEMENTS_MAX_CHARS = 100_000
 
 # Evidence dropped first when the message is over budget: the least specific
 # sections, in order.  Everything not listed is kept, so `failures`, `results`
 # and `rtl` -- the sections the review is actually built from -- are the last
 # things to go.  Mirrors the client-side drop order deliberately.
-_IMPROVEMENTS_DROP_ORDER = ("log", "sim_output", "reports", "artifacts", "coverage")
+_IMPROVEMENTS_DROP_ORDER = (
+    "log", "sim_output", "reports", "artifacts", "coverage", "testbench",
+)
 
 # The buckets the model returns, mapped onto ports by the app.  Named for what
 # they MEAN rather than for the verilator port names, because "improvements_rtl"
 # is a nonsense label for a device block running Python.
-_IMPROVEMENTS_KEYS = ("design", "tests", "summary")
+#
+# "spec" is verilator-only and is EXPECTED to come back empty most of the time:
+# most runs are a design fault or a test gap, and the contract was never in
+# question.  The app treats an empty spec bucket as the answer rather than as a
+# failure, because that port is wired into spec_hdl.feedback and anything
+# written there triggers a revision.
+_IMPROVEMENTS_KEYS = ("design", "tests", "spec", "summary")
+
+# Built FROM the keys rather than written out, because the two error paths in
+# run_improvements are the one place _IMPROVEMENTS_KEYS is not iterated, and a
+# bucket missing from an error envelope leaves a "Reviewing the run..."
+# placeholder standing on the block forever.
+_EMPTY_IMPROVEMENTS = dict.fromkeys(_IMPROVEMENTS_KEYS, "")
 
 
 def build_improvements_message(
@@ -2501,7 +2670,7 @@ async def generate_improvements_payload(
     run: dict[str, str] | None = None,
     model: str | None = None,
 ) -> dict | None:
-    """Review a finished run.  Returns {"design", "tests", "summary"} or None.
+    """Review a finished run.  Returns {"design", "tests", "spec", "summary"} or None.
 
     ``None`` means "no LLM configured".  The caller answers with a graceful
     empty result rather than raising: the run itself already SUCCEEDED, and a
@@ -2518,8 +2687,14 @@ async def generate_improvements_payload(
     user_message = build_improvements_message(
         kind=kind, block_description=block_description, verdict=verdict, run=run
     )
+    # 4096, matching _DEFAULT_MAX_TOKENS in app/core/llm.py.  Three bullet
+    # buckets plus a summary is ~1800 tokens, which fits inside 2048 with under
+    # 15% to spare -- and an overrun here is not graceful degradation, it is a
+    # truncated JSON document that fails to parse and blanks all three ports.
+    # Note the ceiling binds only the Anthropic path: _openai_chat does not pass
+    # max_tokens at all, so a claude-* run_llm_model was the only way to hit it.
     raw = await _call_openai_json(
-        system_prompt, user_message, temperature=0.3, model=model, max_tokens=2048
+        system_prompt, user_message, temperature=0.3, model=model, max_tokens=4096
     )
     return {key: str(raw.get(key, "") or "").strip() for key in _IMPROVEMENTS_KEYS}
 
@@ -2544,9 +2719,7 @@ async def run_improvements(body: ImprovementsRequest, user: CurrentUser) -> dict
         if payload is None:
             log.info("blocks_improvements_no_key", block=body.block_name, kind=body.kind)
             return {
-                "design": "",
-                "tests": "",
-                "summary": "",
+                **_EMPTY_IMPROVEMENTS,
                 "status": "error",
                 "errors": "no AI key configured, so the run could not be reviewed",
             }
@@ -2554,7 +2727,7 @@ async def run_improvements(body: ImprovementsRequest, user: CurrentUser) -> dict
         return {**payload, "status": "ok", "errors": ""}
     except Exception as exc:  # noqa: BLE001 - deliberately total; see docstring
         log.error("blocks_improvements_error", block=body.block_name, error=str(exc))
-        return {"design": "", "tests": "", "summary": "", "status": "error", "errors": str(exc)}
+        return {**_EMPTY_IMPROVEMENTS, "status": "error", "errors": str(exc)}
 
 @router.post("/regenerate/tool")
 async def regenerate_tool_block(

@@ -184,6 +184,60 @@ def test_drift_from_an_existing_design_is_a_warning_not_a_problem():
     assert any("almost_full" in w for w in warnings)
 
 
+# ── full_spec: the whole contract as one document ─────────────────────────────
+
+
+def _full(**over):
+    """The output-port mapping compose_full_spec is handed, minus overrides."""
+    base = _payload()
+    base.update({"status": "ok", "errors": ""})
+    base.update(over)
+    return base
+
+
+def test_full_spec_carries_every_substantive_port_in_document_order():
+    doc = hdl.compose_full_spec(_full())
+    assert doc.startswith("# Full Specification: sync_fifo")
+    headings = [line for line in doc.splitlines() if line.startswith("## ")]
+    assert headings == [
+        "## Top Module", "## Overview", "## Specification", "## Requirements",
+        "## Interface", "## Signals Analysis", "## Parameters", "## Timing",
+        "## Assumptions", "## Open Questions",
+    ]
+    assert SPEC_TEXT in doc
+    assert "REQ-3: A write asserted while full must not modify" in doc
+    assert SIGNALS in doc
+    assert "DATA_WIDTH = 16" in doc
+
+
+def test_full_spec_never_carries_the_run_bookkeeping_ports():
+    # "needs_review" / "AI not configured" describe the RUN, not the contract;
+    # a reader handed this document must not mistake them for requirements.
+    doc = hdl.compose_full_spec(_full(status="needs_review", errors="boom"))
+    assert "needs_review" not in doc
+    assert "boom" not in doc
+    assert "## Status" not in doc and "## Errors" not in doc
+
+
+def test_an_empty_port_contributes_no_heading_at_all():
+    doc = hdl.compose_full_spec(_full(assumptions="", improvements="   "))
+    assert "## Assumptions" not in doc
+    assert "## Open Questions" not in doc
+    assert "## Specification" in doc
+
+
+def test_the_interface_is_fenced_as_json():
+    doc = hdl.compose_full_spec(_full())
+    assert "## Interface\n```json\n[" in doc
+    assert doc.count("```") == 2
+
+
+def test_full_spec_is_empty_when_only_the_module_name_is_known():
+    # A block that has not been run yet is not a title page.
+    assert hdl.compose_full_spec({}) == ""
+    assert hdl.compose_full_spec({"top": "sync_fifo", "status": "error"}) == ""
+
+
 # ── scaffold (no AI, never needs a key) ───────────────────────────────────────
 
 SPEC_HDL_IN = [
@@ -192,8 +246,9 @@ SPEC_HDL_IN = [
     "clocking", "protocol", "throughput", "constraints", "feedback",
 ]
 SPEC_HDL_OUT = [
-    "spec", "top", "interface", "signals_analysis", "parameters", "timing",
-    "requirements", "assumptions", "explanation", "improvements", "status", "errors",
+    "spec", "full_spec", "top", "interface", "signals_analysis", "parameters",
+    "timing", "requirements", "assumptions", "explanation", "improvements",
+    "status", "errors",
 ]
 
 
@@ -253,11 +308,16 @@ async def test_the_outer_loop_can_be_wired_back_to_the_spec():
         block_type="spec_hdl", block_name="s")
     ver = await blocks_router.generate_scaffold_payload(block_type="verilator", block_name="v")
     spec_in = set(_ports(spec_block["tool_calls"][0]["params"], "input"))
+    ver_in = set(_ports(ver["tool_calls"][0]["params"], "input"))
     ver_out = set(_ports(ver["tool_calls"][0]["params"], "output"))
-    # verilator.failures / improvements_rtl -> spec_hdl.feedback, and
+    # verilator.improvements_spec -> spec_hdl.feedback, and
     # code_hdl.code -> spec_hdl.previous_code.
     assert {"feedback", "previous_code"} <= spec_in
-    assert {"failures", "improvements_rtl"} <= ver_out
+    assert {"failures", "improvements_rtl", "improvements_spec"} <= ver_out
+    # ...and the OUTWARD leg that makes the return leg worth reading:
+    # spec_hdl.spec -> verilator.spec, so the review can cite REQ numbers
+    # instead of only describing the ambiguity it found.
+    assert "spec" in ver_in
 
 
 def test_explanation_top_and_parameters_are_deliberately_on_both_sides():
@@ -349,6 +409,11 @@ async def test_generate_writes_every_port_from_one_clean_answer(monkeypatch):
     assert outs["improvements"]["port_content"] == (
         "Decide whether an overflow should be reported."
     )
+    # full_spec is composed from the ports above, never asked of the model.
+    doc = outs["full_spec"]["port_content"]
+    assert doc.startswith("# Full Specification: sync_fifo")
+    for fragment in (SPEC_TEXT, REQUIREMENTS, SIGNALS, "DATA_WIDTH = 16"):
+        assert fragment in doc
     assert len(calls) == 1
     assert "Data width: 16" in calls[0][1]
 
@@ -516,6 +581,9 @@ def test_stub_is_port_complete_and_never_blanks_a_specification():
     assert outs["errors"]["port_content"] == "AI not configured"
     assert outs["status"]["port_content"] == "error"
     assert "returned unchanged" in outs["improvements"]["port_content"]
+    # The document is preserved with the spec: a blank full_spec beside a kept
+    # spec would read as a contract that had lost half of itself.
+    assert SPEC_TEXT in outs["full_spec"]["port_content"]
 
 
 def test_stub_on_a_fresh_block_says_nothing_about_an_unchanged_spec():
@@ -527,6 +595,8 @@ def test_stub_on_a_fresh_block_says_nothing_about_an_unchanged_spec():
     assert outs["improvements"]["port_content"] == ""
     # With no pinned top the block name still gives downstream blocks a handle.
     assert outs["top"]["port_content"] == "fifo_spec"
+    # ...but a name alone is not a specification, so the document stays empty.
+    assert outs["full_spec"]["port_content"] == ""
 
 
 # ── voice / text creation ─────────────────────────────────────────────────────

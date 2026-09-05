@@ -339,9 +339,9 @@ async def _enrich_memory_block(action: dict[str, Any], session_id: str) -> Enric
     """Scaffold a memory block's ports for the mode it was asked for.
 
     Memory is the one scaffold type whose ports depend on a PARAM, not just the
-    type: snapshot, sequential and accumulate are three different blocks. Without
-    this the generic scaffolder would always lay out the snapshot shape, so "create
-    an accumulate memory block" produced a snapshot one with no way to tell.
+    type: snapshot, sequential, accumulate and merge are four different blocks.
+    Without this the generic scaffolder would always lay out the snapshot shape, so
+    "create an accumulate memory block" produced a snapshot one with no way to tell.
 
     The normalised mode is written back onto the action because the client needs it
     too — ``memory_mode`` is persisted on the block and decides what Run does.

@@ -91,7 +91,8 @@ class SpecHdlGenerateRequest(BaseModel):
     check the proposed interface.
 
     ``feedback`` is a review of the loop — verilator's failing tests, or an
-    ``improvements_rtl``/``improvements_test`` bullet. It selects the REVISION
+    ``improvements_spec`` bullet (or, more crudely,
+    an ``improvements_rtl`` one). It selects the REVISION
     flow rather than the fresh one, because when a design and its tests disagree
     the fault is often the spec they were both derived from, and [fix_rtl] can
     only ever repair the design.
@@ -193,6 +194,37 @@ class RunAccumulateRequest(BaseModel):
     description: str = ""
     previous_accumulated: str = ""
     new_data: str = ""
+    run_llm_model: str | None = None
+
+
+class MergeInputItem(BaseModel):
+    """One input port's contribution to a merge memory block's run."""
+
+    port: str
+    text: str = ""
+
+
+class RunMergeRequest(BaseModel):
+    """Inputs for reviewing the several values a memory block merged in ONE run.
+
+    The merge memory block writes the raw labelled combination to its
+    ``merged_data`` port itself, locally, before it calls here -- so this endpoint
+    never produces the merge, only the review of it.  That split is what keeps the
+    data safe when the model call fails.
+
+    Unlike accumulate there is no history to compare against: these inputs are
+    PEERS that arrived together, and each run REPLACES both outputs.  The question
+    is therefore not "is this new?" but how the inputs agree, conflict and
+    complement each other.
+
+    Each input is labelled with the port it came from, and the caller uses the same
+    ``--- <port> ---`` markers it wrote into ``merged_data``, so the review's
+    citations line up with what the user sees on the block.
+    """
+
+    block_name: str
+    description: str = ""
+    inputs: list[MergeInputItem] = []
     run_llm_model: str | None = None
 
 

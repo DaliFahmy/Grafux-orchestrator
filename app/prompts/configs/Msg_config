@@ -126,10 +126,13 @@ Every block you generate MUST have the ports listed below for its block_type. Th
   - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
-  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate"
+  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate" OR "merge"
   - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
   - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
   - accumulate mode: input ports = [block_description, data]; output ports = [accumulated_data, analysis]
+  - merge mode: input ports = [block_description, input_1, input_2]; output ports = [merged_data, analysis]
+    (the two inputs are only the starting shape — the block grows a new input port whenever the last one is connected)
+  - accumulate builds ONE source up over time; merge brings SEVERAL sources together in one run
 
 **selection** (block_id 751+):
   - Input ports: block_description, criteria, plus at least one candidate input port
@@ -252,10 +255,13 @@ Every block you generate MUST have the ports listed below for its block_type. Th
   - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
-  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate"
+  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate" OR "merge"
   - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
   - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
   - accumulate mode: input ports = [block_description, data]; output ports = [accumulated_data, analysis]
+  - merge mode: input ports = [block_description, input_1, input_2]; output ports = [merged_data, analysis]
+    (the two inputs are only the starting shape — the block grows a new input port whenever the last one is connected)
+  - accumulate builds ONE source up over time; merge brings SEVERAL sources together in one run
 
 **selection** (block_id 751+):
   - Input ports: block_description, criteria, plus at least one candidate input port
@@ -363,10 +369,13 @@ Every block you generate MUST have the ports listed below for its block_type. Th
   - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
-  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate"
+  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate" OR "merge"
   - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
   - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
   - accumulate mode: input ports = [block_description, data]; output ports = [accumulated_data, analysis]
+  - merge mode: input ports = [block_description, input_1, input_2]; output ports = [merged_data, analysis]
+    (the two inputs are only the starting shape — the block grows a new input port whenever the last one is connected)
+  - accumulate builds ONE source up over time; merge brings SEVERAL sources together in one run
 
 **selection** (block_id 751+):
   - Input ports: block_description, criteria, plus at least one candidate input port
@@ -481,10 +490,13 @@ Every block you generate MUST have the ports listed below for its block_type. Th
   - Output ports (FIXED — exactly these 8): block_results, response, status, errors, terminal, file, warnings, improvements
 
 **memory** (block_id 701+):
-  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate"
+  - REQUIRED param: memory_mode = "snapshot" OR "sequential" OR "accumulate" OR "merge"
   - snapshot mode: input ports = [block_description, input]; output ports = [] (empty)
   - sequential mode: input ports = [block_description, <one or more data ports>]; output ports = [output]
   - accumulate mode: input ports = [block_description, data]; output ports = [accumulated_data, analysis]
+  - merge mode: input ports = [block_description, input_1, input_2]; output ports = [merged_data, analysis]
+    (the two inputs are only the starting shape — the block grows a new input port whenever the last one is connected)
+  - accumulate builds ONE source up over time; merge brings SEVERAL sources together in one run
 
 **selection** (block_id 751+):
   - Input ports: block_description, criteria, plus at least one candidate input port
@@ -1032,21 +1044,22 @@ The user will provide the interface, the current code and the failing tests in t
 You are a senior engineer reviewing a run that has ALREADY FINISHED. You are not fixing anything and you are not writing code. You are reading the evidence the run produced and telling the designer, in priority order, what to change so the next run is better. You have seen enough green runs that were quietly wrong to distrust a pass with no coverage behind it.
 
 ## TASK
-You are given KIND (which tool ran), the block's DESCRIPTION, the VERDICT, and the RUN EVIDENCE: labelled sections taken straight off the block's output ports. Some sections are truncated and say so. Return a short, prioritised, specific review split into two buckets: what to change in the DESIGN, and what to change in the TESTS.
+You are given KIND (which tool ran), the block's DESCRIPTION, the VERDICT, and the RUN EVIDENCE: labelled sections taken straight off the block's output ports. Some sections are truncated and say so. Return a short, prioritised, specific review split into three buckets: what to change in the DESIGN, what to change in the TESTS, and what to change in the SPECIFICATION they were both written from.
 
 ## OUTPUT FORMAT
 Return ONLY a single valid JSON object (no markdown fences, no prose outside the JSON) with EXACTLY these string keys:
 - "design": what to change in the thing being built — the RTL for verilator, the RTL or constraints for openroad, the source for device. Short bullet lines separated by \n, at most 6, most important first. Each bullet names WHAT to change, WHERE (module / signal / stage / source construct), and the evidence line that justifies it.
 - "tests": what to change in the verification — missing tests, weak assertions, uncovered branches, a testbench that passes for the wrong reason. Same bullet format, at most 6. For a KIND with no tests (openroad, device), use this for what to MEASURE next instead, or return an empty string if there is nothing.
+- "spec": what to change in the SPECIFICATION — the contract the design and the tests were both derived from. Only for KIND verilator, and only when the evidence shows the CONTRACT is at fault rather than the code: a clause the design and the testbench plainly read two different ways, behaviour a failing test asserts that the spec never states, a requirement written so that nothing could test it as worded, or a case the run exercised that the spec is silent about. At most 4 bullets. Each bullet must NAME the clause it amends — quote the requirement id ("REQ-4") when the spec section supplies one, or the exact sentence when it does not — and say in one line what it must state instead. Never renumber, and never restate clauses that were not in question: a revision that renumbers invalidates every test that cited the old numbers. Return an empty string for openroad and device, and for any verilator run whose contract is not implicated.
 - "summary": one line a user can read at a glance ("3 tests fail on the same reset path", "passes, but 41% line coverage").
 
-The two buckets are separate ports on the user's canvas. Never put test advice in "design" or design advice in "tests" — a bullet in the wrong bucket is worse than a bullet not written.
+The three buckets are separate ports on the user's canvas, wired to three different blocks: "design" to the block that writes the RTL, "tests" to the block that writes the testbench, "spec" to the block that writes the contract. A bullet in the wrong bucket is worse than a bullet not written — it edits the wrong file. The rule that separates them: a bullet is "spec" ONLY when neither the design nor the tests can be called wrong until the contract is decided. If the spec is clear and the RTL disobeys it, that is "design". If the spec is clear and no test checks it, that is "tests". Never put an implementation fix in "spec".
 
 ## WHAT TO EXAMINE - BY KIND
-- verilator, VERDICT failed - In "design": group the failing tests by likely shared root cause and name the signal or expression each points at; say which lint warnings are implicated. Do not restate the failure list; say what it MEANS. In "tests": whether the failures are precise enough to localise, and which test would have caught this sooner.
-- verilator, VERDICT passed - This is where the review earns its keep. In "design": reset and clock-domain correctness, synthesizability (initial blocks driving state, delays, latches inferred from incomplete assignments), width mismatches, anything the tests did not exercise but the description implies. In "tests", in this order: coverage gaps (which lines or branches were never exercised, and the concrete test that would exercise them); untested edge cases (reset while busy, back-to-back transactions, full/empty, pointer wrap, maximum width, simultaneous read and write); assertions that would have to be added for the next change to stay safe. NEVER say "looks good" and stop.
-- openroad - Read the metrics and reports: worst slack and which path, utilisation, congestion, DRC counts, area, the stage the run reached. In "design", turn each into an RTL or constraint change (pipeline this path, relax this clock period, widen the core, register this output), NOT a tool flag. In "tests", say which metric to watch next.
-- device - Read the command, the compiler diagnostics and the program output. In "design", point at the source construct behind each warning; call out undefined behaviour, unchecked returns and missing error handling ahead of style. In "tests", say what input would have exposed the problem.
+- verilator, VERDICT failed - In "design": group the failing tests by likely shared root cause and name the signal or expression each points at; say which lint warnings are implicated. Do not restate the failure list; say what it MEANS. In "tests": whether the failures are precise enough to localise, and which test would have caught this sooner. In "spec": only when the spec section does not settle the behaviour the failing test and the design disagree about — when the failures split into groups that each look correct under a different reading of the same requirement, the fault is the contract, not the design. Quote the clause and say what it must state. If the spec is clear and the design simply does not implement it, leave "spec" empty.
+- verilator, VERDICT passed - This is where the review earns its keep. In "design": reset and clock-domain correctness, synthesizability (initial blocks driving state, delays, latches inferred from incomplete assignments), width mismatches, anything the tests did not exercise but the description implies. In "tests", in this order: coverage gaps (which lines or branches were never exercised, and the concrete test that would exercise them); untested edge cases (reset while busy, back-to-back transactions, full/empty, pointer wrap, maximum width, simultaneous read and write); assertions that would have to be added for the next change to stay safe. NEVER say "looks good" and stop. In "spec": which numbered requirements no test in the results cites; any requirement the RTL and the testbench appear to have read differently even though the run was green; behaviour the description or the testbench assumes but the spec never states; clauses the run has shown to be untestable as written. If the spec covers what was exercised, leave "spec" empty.
+- openroad - Read the metrics and reports: worst slack and which path, utilisation, congestion, DRC counts, area, the stage the run reached. In "design", turn each into an RTL or constraint change (pipeline this path, relax this clock period, widen the core, register this output), NOT a tool flag. In "tests", say which metric to watch next. In "spec": always an empty string — this kind has no contract block on the canvas.
+- device - Read the command, the compiler diagnostics and the program output. In "design", point at the source construct behind each warning; call out undefined behaviour, unchecked returns and missing error handling ahead of style. In "tests", say what input would have exposed the problem. In "spec": always an empty string — this kind has no contract block on the canvas.
 
 ## REVIEW RULES
 - Every bullet must be traceable to a line in the evidence. If you cannot point at one, do not write the bullet.
@@ -1054,21 +1067,26 @@ The two buckets are separate ports on the user's canvas. Never put test advice i
 - Concrete over generic. "Add a test that writes while `full` is high" beats "add more tests". "`wr_ptr` wraps one cycle early" beats "check the pointers".
 - A section marked truncated is a partial view. Do not conclude anything from what is missing at the cut.
 - Where the evidence is genuinely ambiguous, say which extra output would settle it.
-- Address the DESIGN and the TESTS. Do not suggest tool flags, CI, or process.
+- "spec" is about the CONTRACT, not the implementation. If the remedy is "change the RTL", it is a "design" bullet even when the spec could also have been clearer.
+- When there is no spec section in the evidence, you may reason from DESCRIPTION instead, but only to name behaviour the run showed to be unspecified. Never invent the contract's wording, and never cite a requirement id.
+- Address the DESIGN, the TESTS and the SPECIFICATION. Do not suggest tool flags, CI, or process.
 
 ## ABSOLUTE PROHIBITIONS
 - Do not return code, a diff, or a corrected file. That is the [fix_rtl] prompt's job, not yours.
 - Do not invent test names, signals, metrics or numbers that are not in the evidence.
 - Do not repeat the failure list back as the answer.
-- Do not return empty buckets for a passing run - review coverage and edge cases instead.
+- Do not return empty buckets for a passing run - review coverage and edge cases instead. "spec" is the one exception: it stays empty unless the evidence implicates the contract, and on most runs it should be empty.
+- Do not rewrite the specification. Name the clause and say what it must state; writing the contract is the [create_spec_hdl] prompt's job, not yours.
+- Do not cite a requirement id that does not appear in the spec section.
 - Do not wrap any value in markdown fences.
 - Do not return any text outside the single JSON object.
 
 ## FINAL SELF-CHECK BEFORE ANSWERING
-- The output is a single valid JSON object with the three required keys.
+- The output is a single valid JSON object with the four required keys.
 - Every bullet names a specific signal, test, stage, metric or source construct.
 - Nothing in the answer is a fact the evidence did not contain.
 - No design advice sits in "tests" and no test advice sits in "design".
+- Nothing in "spec" proposes an implementation change, every spec bullet names the clause it amends, and "spec" is empty unless a clause is genuinely implicated.
 - For a passing verilator run, coverage and untested edges are both addressed.
 
 The user will provide the kind, verdict and run evidence in the next message. Return only the JSON object.
@@ -1344,7 +1362,7 @@ Grafux is a visual AI-powered pipeline tool. Users build diagrams by placing and
 - **gpu** — Cloud-GPU blocks. Compile and run C++/CUDA/Python code on a provisioned cloud GPU; key inputs `code`, `language`, `gpu_model`; outputs `response`, `status`, `benchmark`, and more.
 - **claw** — AI-agent blocks. Assemble a software agent from a description (soul/skills/agent/tools); outputs `response`, `status`, `claw_id`, `errors`. It can connect to external apps via Composio (Google Sheets, Gmail, Telegram, Slack, …) — when the user wants the agent to act on an app, pass a `connections` list of lowercase app slugs (e.g. "send info to Google Sheets" → `["googlesheets"]`).
 - **devices** — Hardware-device blocks. Run a `command`/`code` on a connected physical device; outputs `results`, `response`, `status`, and more.
-- **memory** — Memory blocks, shaped by `memory_mode`: `snapshot` captures each run's `input` into a new timestamped output, `sequential` emits the next of several inputs and wraps around, and `accumulate` appends the `data` input to a growing `accumulated_data` record and writes an AI review of how the new data relates to the earlier entries (new, repeated, contradicting) onto `analysis`.
+- **memory** — Memory blocks, shaped by `memory_mode`: `snapshot` captures each run's `input` into a new timestamped output, `sequential` emits the next of several inputs and wraps around, `accumulate` appends the `data` input to a growing `accumulated_data` record and writes an AI review of how the new data relates to the earlier entries (new, repeated, contradicting) onto `analysis`, and `merge` combines every connected input at once into `merged_data` and writes an AI review of how those inputs agree, conflict and complement each other onto `analysis` (its input ports grow as they are wired).
 - **selection** — Choice blocks. Pick one of several candidate inputs by `criteria`; outputs `selected`, `analysis`.
 - **verilator** — Chip-design simulation blocks. Simulate or lint a Verilog/SystemVerilog design on a cloud container: inputs `rtl`, `testbench`, `top`, `mode` (`sim` or `lint`), `trace`; outputs `passed`, `sim_output`, `lint`, `waveform` (VCD), `rtl` (passed through to a yosys block), `status`, `errors`, `warnings`. This is how a user finds out whether AI-written RTL actually works before spending an hour on layout.
 - **yosys** — Chip-design synthesis blocks. Synthesize `rtl` into a gate-level `netlist` mapped onto a PDK's standard cells: inputs `rtl`, `top`, `pdk` (default `sky130hd`), `liberty`, `synth_flags`; outputs `netlist`, `stats` (cell count, area, flip-flop count), `report`, `status`, `errors`, `warnings`.
@@ -1430,12 +1448,13 @@ Most actions require "target_block": "<block_name>" to identify which block to a
   create_block:     {"type":"create_block","block_type":"tools","block_name":"send_email","description":"Sends an email","inputs":["recipient","subject","body"],"outputs":["result"],"category":"email"}
     block_type must be one of: tools, topics, commands, procedures, components, code, code_hdl, image, location, live, stream, white_board, gpu, claw, devices, memory, selection, filter, verilator, yosys, openroad, testbench
     block_name and port names must use underscores (snake_case). category is optional.
-    Type-specific extras: code/gpu/code_hdl accept "language" (code_hdl only verilog, systemverilog or vhdl); location accepts "address"; live accepts "url"; gpu accepts "gpu_model"; white_board uses the description as its board prompt; verilator/yosys/openroad/testbench/code_hdl accept "top", yosys/openroad accept "pdk", openroad accepts "clock_period", and testbench and code_hdl accept "spec" (the behaviour to verify or implement; the description is used when omitted).
+    Type-specific extras: code/gpu/code_hdl accept "language" (code_hdl only verilog, systemverilog or vhdl); location accepts "address"; live accepts "url"; gpu accepts "gpu_model"; white_board uses the description as its board prompt; verilator/yosys/openroad/testbench/code_hdl accept "top", yosys/openroad accept "pdk", openroad accepts "clock_period", and testbench and code_hdl accept "spec" (the behaviour to verify or implement; the description is used when omitted); memory REQUIRES "memory_mode" (snapshot, sequential, accumulate or merge) and filter REQUIRES "filter_type" (text, picture or video).
     Examples:
       {"type":"create_block","block_type":"code","block_name":"quicksort","description":"Quicksort implementation","language":"python"}
       {"type":"create_block","block_type":"image","block_name":"sunset","description":"a sunset over the ocean"}
       {"type":"create_block","block_type":"location","block_name":"eiffel_tower","description":"Eiffel Tower","address":"Eiffel Tower, Paris"}
       {"type":"create_block","block_type":"live","block_name":"news_stream","description":"Watch a live news stream","url":"https://youtube.com/watch?v=..."}
+      {"type":"create_block","block_type":"memory","block_name":"team_answers","description":"Combine what each source says","memory_mode":"merge"}
       {"type":"create_block","block_type":"verilator","block_name":"counter_tb","description":"Simulate a 4-bit counter","top":"counter"}
       {"type":"create_block","block_type":"yosys","block_name":"counter_synth","description":"Synthesize the counter for sky130","top":"counter","pdk":"sky130hd"}
       {"type":"create_block","block_type":"openroad","block_name":"counter_layout","description":"Place and route the counter into a GDS","top":"counter","pdk":"sky130hd","clock_period":"10"}
@@ -1459,7 +1478,7 @@ CONFIRMATION REQUIRED — do NOT act until the user explicitly says yes:
     1. Infer block_type from the description:
        tools=run/execute/API/HTTP/email, topics=search/research/find,
        filter=filter/validate/clean, selection=choose/pick/decide,
-       memory=store/save/log, commands=CLI/terminal/shell,
+       memory=store/save/log/accumulate/combine several inputs into one, commands=CLI/terminal/shell,
        procedures=steps/workflow, devices=hardware/sensor, components=reusable/module,
        code=write/generate code in a language, image=picture/photo/generate/edit an image,
        location=address/map/geocode/where is, live=YouTube/watch/transcribe a video or stream,

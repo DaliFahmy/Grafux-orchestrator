@@ -169,7 +169,9 @@ async def test_scaffold_extra_inputs_outputs_appended_and_deduped():
 # Run in a way that points nowhere near the cause.
 
 _VERILATOR_INPUTS = {
-    "block_description", "rtl", "testbench", "sva", "top", "mode", "simulator",
+    # `spec` is wire-only: evidence for the run review, never a run parameter,
+    # and never seeded (that would put a second copy of the contract on canvas).
+    "block_description", "spec", "rtl", "testbench", "sva", "top", "mode", "simulator",
     "tests", "seed", "collect_coverage", "max_iterations", "defines",
     "include_dirs", "files", "trace", "sim_args", "verilator_flags", "timeout",
     "instance_type", "image", "api_keys",
@@ -178,9 +180,11 @@ _VERILATOR_OUTPUTS = {
     "status", "passed", "results", "failures", "coverage", "coverage_report",
     "iterations", "sim_output", "lint", "errors", "warnings", "waveform",
     "rtl", "top", "log", "artifacts", "eda_id", "cost",
-    # Split in two: the review of the DESIGN and the review of the TESTS land on
-    # separate ports so each can be wired somewhere different.
-    "improvements_rtl", "improvements_test",
+    # Split in three: the review of the DESIGN, of the TESTS, and of the
+    # SPECIFICATION they were both written from land on separate ports so each
+    # can be wired somewhere different.  improvements_spec is the outer loop's
+    # return leg into spec_hdl.feedback.
+    "improvements_rtl", "improvements_test", "improvements_spec",
 }
 _YOSYS_INPUTS = {
     "block_description", "rtl", "top", "pdk", "liberty", "synth_flags", "defines",
@@ -424,7 +428,9 @@ def test_memory_scaffold_spec_falls_back_to_snapshot():
     assert blocks_router.memory_scaffold_spec("nonsense") == snapshot
     assert blocks_router.memory_scaffold_spec("ACCUMULATE") == \
         blocks_router.memory_scaffold_spec("accumulate")
-    assert set(blocks_router.MEMORY_MODES) == {"snapshot", "sequential", "accumulate"}
+    assert set(blocks_router.MEMORY_MODES) == {
+        "snapshot", "sequential", "accumulate", "merge",
+    }
 
 
 def test_memory_registry_entry_matches_the_snapshot_mode():
@@ -487,3 +493,173 @@ async def test_run_accumulate_leaves_a_short_record_unmarked(monkeypatch):
     assert "deploys to Render" in captured["user"]
     assert "deploys to Fly.io" in captured["user"]
     assert "deployment facts" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_scaffold_memory_merge_starting_shape():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="memory",
+        block_name="team answers",
+        description="what everyone said",
+        spec_override=blocks_router.memory_scaffold_spec("merge"),
+    )
+    params = result["tool_calls"][0]["params"]
+    ins = _ports(params, "input")
+    outs = _ports(params, "output")
+    # Only the STARTING shape: the client grows input_3, input_4 ... as ports get
+    # wired, and persists the result with the block. Nothing here tracks that.
+    assert set(ins) == {"block_description", "input_1", "input_2"}
+    assert set(outs) == {"merged_data", "analysis"}
+    assert ins["input_1"]["port_path"] == "data/memory/team_answers/inputs/input_1.txt"
+    assert outs["merged_data"]["port_path"] ==         "data/memory/team_answers/outputs/merged_data.txt"
+    # Both outputs start empty: merge REPLACES them on every Run.
+    assert outs["merged_data"]["port_content"] == ""
+    assert outs["analysis"]["port_content"] == ""
+
+
+def test_memory_merge_is_its_own_shape():
+    merge = blocks_router.memory_scaffold_spec("merge")
+    assert merge != blocks_router.memory_scaffold_spec("accumulate")
+    assert merge.category_based is False
+    assert blocks_router.memory_scaffold_spec("MERGE") == merge
+
+
+# ── /run/merge: the review across several inputs that arrived together ───────
+
+
+def _merge_body(**kw):
+    kw.setdefault("block_name", "team_answers")
+    return blocks_router.RunMergeRequest(**kw)
+
+
+@pytest.mark.asyncio
+async def test_run_merge_labels_every_input_by_its_port(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["system"] = system_prompt
+        captured["user"] = user_message
+        return {"analysis": "a", "agreements": [], "conflicts": ["x vs y"],
+                "complements": []}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    body = _merge_body(
+        description="what the team said",
+        inputs=[
+            {"port": "input_1", "text": "ship on Tuesday"},
+            {"port": "input_2", "text": "ship on Friday"},
+        ],
+    )
+    result = await blocks_router.run_merge_block(body, user=None)
+
+    assert result["conflicts"] == ["x vs y"]
+    # The same "--- port ---" markers the client wrote into merged_data, so a
+    # citation in the review points at something the user can see on the block.
+    assert "--- input_1 ---" in captured["user"]
+    assert "--- input_2 ---" in captured["user"]
+    assert captured["user"].index("input_1") < captured["user"].index("input_2")
+    assert "ship on Tuesday" in captured["user"]
+    assert "what the team said" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_run_merge_head_truncates_a_long_input(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["user"] = user_message
+        return {}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    head = "Q" * 50
+    tail = "Z" * 50
+    long_text = head + "Q" * blocks_router._MERGE_MAX_PER_INPUT_CHARS + tail
+    await blocks_router.run_merge_block(
+        _merge_body(inputs=[{"port": "input_1", "text": long_text}]), user=None,
+    )
+
+    # HEAD, not tail: each input is a whole document that arrived on its own wire,
+    # and its opening is the representative sample (accumulate keeps tails because
+    # it is reading a log). The cut is marked so the prompt's "do not claim an
+    # absence you cannot see" rule has something to fire on.
+    assert captured["user"].count("Q") == blocks_router._MERGE_MAX_PER_INPUT_CHARS
+    assert "Z" not in captured["user"]
+    assert blocks_router._MERGE_TRUNCATION_MARKER in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_run_merge_caps_the_total_and_says_how_many_it_dropped(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["user"] = user_message
+        return {}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    big = "Q" * blocks_router._MERGE_MAX_PER_INPUT_CHARS
+    count = blocks_router._MERGE_MAX_TOTAL_CHARS // blocks_router._MERGE_MAX_PER_INPUT_CHARS + 3
+    await blocks_router.run_merge_block(
+        _merge_body(inputs=[{"port": f"input_{i}", "text": big} for i in range(count)]),
+        user=None,
+    )
+
+    assert captured["user"].count("Q") <= blocks_router._MERGE_MAX_TOTAL_CHARS
+    assert "too large to include" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_run_merge_caps_the_number_of_inputs(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["user"] = user_message
+        return {}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    over = blocks_router._MERGE_MAX_INPUTS + 4
+    await blocks_router.run_merge_block(
+        _merge_body(inputs=[{"port": f"input_{i}", "text": "x"} for i in range(over)]),
+        user=None,
+    )
+
+    assert captured["user"].count("--- input_") == blocks_router._MERGE_MAX_INPUTS
+    assert "too large to include" in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_run_merge_with_no_usable_inputs_still_calls_cleanly(monkeypatch):
+    captured: dict = {}
+
+    async def fake_json(system_prompt, user_message, temperature=0.3, *, model=None, max_tokens=4096):
+        captured["user"] = user_message
+        return {"analysis": "nothing to compare", "agreements": [],
+                "conflicts": [], "complements": []}
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_json)
+
+    # The client refuses to call at all with zero usable inputs, but a body that
+    # gets here anyway must not produce a malformed prompt.
+    result = await blocks_router.run_merge_block(_merge_body(inputs=[]), user=None)
+
+    assert result["analysis"] == "nothing to compare"
+    assert "(no connected inputs had any content)" in captured["user"]
+    assert "too large to include" not in captured["user"]
+
+
+@pytest.mark.asyncio
+async def test_run_merge_reraises_when_the_model_call_fails(monkeypatch):
+    async def boom(*a, **kw):
+        raise RuntimeError("model down")
+
+    monkeypatch.setattr(blocks_router, "_call_openai_json", boom)
+
+    # The raw merge is already on merged_data by the time we get here, so the
+    # client can report "analysis unavailable" and keep the data.
+    with pytest.raises(RuntimeError):
+        await blocks_router.run_merge_block(
+            _merge_body(inputs=[{"port": "input_1", "text": "a"}]), user=None,
+        )
