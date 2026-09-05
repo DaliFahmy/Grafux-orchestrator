@@ -20,15 +20,65 @@ from app.core import llm
 # ── Fakes ────────────────────────────────────────────────────────────────────
 
 
+# Kwargs the real ``AsyncMessages.create`` accepts, read off the installed SDK.
+# A double looser than the thing it stands in for hides exactly the drift these
+# tests exist to catch: the branch below builds `output_config`, which anthropic
+# 0.71 does not accept and which a **kwargs-swallowing fake reports as a pass.
+# The hard-coded set is the floor from requirements.txt, used only when the SDK
+# is not installed at all.
+_FALLBACK_CREATE_KWARGS = frozenset({
+    "max_tokens", "messages", "model", "container", "context_management",
+    "mcp_servers", "metadata", "output_config", "service_tier", "stop_sequences",
+    "stream", "system", "temperature", "thinking", "tool_choice", "tools",
+    "top_k", "top_p", "betas", "extra_headers", "extra_query", "extra_body",
+    "timeout",
+})
+
+
+def _sdk_create_kwargs() -> frozenset[str]:
+    try:
+        import inspect
+
+        from anthropic.resources.messages import AsyncMessages
+    except Exception:                                   # SDK not installed
+        return _FALLBACK_CREATE_KWARGS
+    return frozenset(inspect.signature(AsyncMessages.create).parameters) - {"self"}
+
+
 class _FakeAnthropic:
-    def __init__(self, response):
+    """A double as strict as the SDK: unknown kwargs raise, as they really do.
+
+    ``error`` is raised AFTER the call is recorded, so a test can count attempts
+    (what the auth latch is about) and not merely successes.
+    """
+
+    def __init__(self, response=None, error: BaseException | None = None):
         self._response = response
+        self._error = error
         self.calls: list[dict] = []
         self.messages = SimpleNamespace(create=self._create)
 
     async def _create(self, **kwargs):
         self.calls.append(kwargs)
+        unknown = set(kwargs) - _sdk_create_kwargs()
+        if unknown:
+            raise TypeError(
+                f"create() got an unexpected keyword argument {sorted(unknown)!r} "
+                f"-- the installed anthropic SDK would reject this request"
+            )
+        for required in ("model", "max_tokens", "messages"):
+            if required not in kwargs:
+                raise TypeError(f"create() missing required argument: {required!r}")
+        if self._error is not None:
+            raise self._error
         return self._response
+
+
+def _auth_error(status: int = 401):
+    """An exception shaped like anthropic.AuthenticationError, without the SDK."""
+    return type("FakeAPIStatusError", (Exception,), {"status_code": status})(
+        f"Error code: {status} - invalid x-api-key"
+    )
 
 
 class _FakeOpenAI:
@@ -93,6 +143,15 @@ def _install(monkeypatch, *, anthropic=None, openai=None, settings=None):
         monkeypatch.setattr(llm, "get_async_anthropic", lambda: anthropic)
     if openai is not None:
         monkeypatch.setattr(llm, "get_async_openai", lambda: openai)
+
+
+
+def _raise_no_key():
+    raise ValueError("ANTHROPIC_API_KEY not configured")
+
+
+def _raise_no_openai_key():
+    raise ValueError("OPENAI_API_KEY not configured")
 
 
 _TOOLS = [{
@@ -291,6 +350,177 @@ async def test_claude_without_a_key_falls_back_to_openai(monkeypatch):
     turn = await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
 
     assert (turn.provider, turn.model) == ("openai", "gpt-4o")
+
+
+# ── A rejected key ───────────────────────────────────────────────────────────
+#
+# A key that is PRESENT but wrong used to be strictly worse than no key at all:
+# the missing-key gate never fired, the 401 raised out of the provider branch,
+# and a block agent died on step 1 of 24 with the raw JSON error in its chat.
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_anthropic_key_falls_back_to_openai(monkeypatch):
+    anthropic = _FakeAnthropic(error=_auth_error(401))
+    openai = _FakeOpenAI(_openai_response(text="hello"))
+    _install(monkeypatch, anthropic=anthropic, openai=openai)
+
+    turn = await llm.call_llm_tools("s", [{"role": "user", "content": "go"}], _TOOLS,
+                                    model="claude-opus-5")
+
+    assert (turn.provider, turn.model) == ("openai", "gpt-4o")
+    # The transcript reached the fallback translated, not dropped.
+    assert openai.calls[0]["messages"][-1] == {"role": "user", "content": "go"}
+
+
+@pytest.mark.asyncio
+async def test_the_fallback_latches_so_a_run_pays_the_401_once(monkeypatch):
+    """24 steps must not mean 24 doomed round-trips."""
+    anthropic = _FakeAnthropic(error=_auth_error(401))
+    openai = _FakeOpenAI(_openai_response(text="hello"))
+    _install(monkeypatch, anthropic=anthropic, openai=openai)
+
+    for _ in range(3):
+        await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+
+    assert len(anthropic.calls) == 1
+    assert len(openai.calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_a_403_latches_too(monkeypatch):
+    anthropic = _FakeAnthropic(error=_auth_error(403))
+    openai = _FakeOpenAI(_openai_response(text="hello"))
+    _install(monkeypatch, anthropic=anthropic, openai=openai)
+
+    turn = await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+
+    assert turn.provider == "openai"
+    assert not llm._anthropic_available("anthropic")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [400, 429, 500, 529])
+async def test_a_non_auth_failure_is_neither_hidden_nor_latched(monkeypatch, status):
+    """A contract break (400) or an overload (429/5xx) must not become a GPT answer.
+
+    Answering a 400 from another vendor is how an API-contract break ships;
+    latching on a transient blip would downgrade the whole process for the
+    cooldown over one bad minute.
+    """
+    anthropic = _FakeAnthropic(error=_auth_error(status))
+    openai = _FakeOpenAI(_openai_response(text="hello"))
+    _install(monkeypatch, anthropic=anthropic, openai=openai)
+
+    with pytest.raises(Exception) as caught:
+        await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+
+    assert getattr(caught.value, "status_code", None) == status
+    assert openai.calls == []
+    assert llm._anthropic_available("anthropic")          # latch still clear
+
+
+@pytest.mark.asyncio
+async def test_a_client_that_cannot_be_built_takes_the_same_fallback(monkeypatch):
+    """get_async_anthropic raises for an unconfigured key; that is a fallback, not a 500."""
+    openai = _FakeOpenAI(_openai_response(text="hello"))
+    _install(monkeypatch, openai=openai)
+    monkeypatch.setattr(llm, "get_async_anthropic", _raise_no_key)
+
+    turn = await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+
+    assert turn.provider == "openai"
+
+
+@pytest.mark.asyncio
+async def test_with_no_provider_left_the_error_says_which_key_to_set(monkeypatch):
+    anthropic = _FakeAnthropic(error=_auth_error(401))
+    _install(monkeypatch, anthropic=anthropic,
+             settings=_settings(openai_key=""))
+    monkeypatch.setattr(llm, "get_async_openai", _raise_no_openai_key)
+
+    with pytest.raises(RuntimeError) as caught:
+        await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+
+    message = str(caught.value)
+    assert "ANTHROPIC_API_KEY" in message
+    assert "OPENAI_API_KEY" in message
+    assert "grafux-orchestrator" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entry", ["tools", "text", "json"])
+async def test_every_entry_point_shares_the_fallback(monkeypatch, entry):
+    anthropic = _FakeAnthropic(error=_auth_error(401))
+    openai = _FakeOpenAI(_openai_response(text='{"ok": true}'))
+    _install(monkeypatch, anthropic=anthropic, openai=openai)
+
+    if entry == "tools":
+        result = await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+        assert result.provider == "openai"
+    elif entry == "text":
+        assert await llm.call_llm_text("s", "u", model="claude-opus-5") == '{"ok": true}'
+    else:
+        assert await llm.call_llm_json("s", "u", model="claude-opus-5") == {"ok": True}
+
+    assert len(anthropic.calls) == 1
+    assert len(openai.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_bad_json_answer_is_not_mistaken_for_an_auth_failure(monkeypatch):
+    """call_llm_json parses INSIDE the attempt, so a parse error still propagates."""
+    anthropic = _FakeAnthropic(_anthropic_response(text="not json"))
+    openai = _FakeOpenAI(_openai_response(text='{"ok": true}'))
+    _install(monkeypatch, anthropic=anthropic, openai=openai)
+
+    with pytest.raises(ValueError):
+        await llm.call_llm_json("s", "u", model="claude-opus-5")
+    assert openai.calls == []
+
+
+def test_make_chat_model_honours_the_latch(monkeypatch):
+    """Once this process has seen the key rejected, LangChain callers stop choosing it."""
+    _install(monkeypatch)
+    llm._disable_anthropic("401")
+    sentinel = object()
+    monkeypatch.setitem(
+        __import__("sys").modules, "langchain_openai",
+        SimpleNamespace(ChatOpenAI=lambda **kw: sentinel),
+    )
+
+    assert llm.make_chat_model("claude-opus-5") is sentinel
+
+
+@pytest.mark.asyncio
+async def test_the_fake_rejects_a_kwarg_the_real_sdk_would_reject():
+    """Meta-test: the double's strictness IS the guard, so pin it."""
+    with pytest.raises(TypeError, match="not_a_real_parameter"):
+        await _FakeAnthropic()._create(
+            model="m", max_tokens=1, messages=[], not_a_real_parameter=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_the_request_only_uses_kwargs_the_installed_sdk_accepts(monkeypatch):
+    """The guard behind the anthropic pin in requirements.txt.
+
+    An SDK too old for output_config raises TypeError before any HTTP call --
+    the same "stopped after an internal error" symptom as a bad key, by a
+    completely different route.
+    """
+    import inspect
+
+    pytest.importorskip("anthropic")
+    from anthropic.resources.messages import AsyncMessages
+
+    accepted = set(inspect.signature(AsyncMessages.create).parameters)
+    fake = _FakeAnthropic(_anthropic_response(text="hi"))
+    _install(monkeypatch, anthropic=fake)
+
+    await llm.call_llm_tools("s", [], _TOOLS, model="claude-opus-5")
+
+    assert set(fake.calls[0]) <= accepted
 
 
 @pytest.mark.asyncio

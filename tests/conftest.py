@@ -16,6 +16,28 @@ os.environ.setdefault("CELERY_RESULT_BACKEND", "cache+memory://")
 os.environ.setdefault("INTERNAL_SERVICE_SECRET", "test_secret")
 
 
+@pytest.fixture(autouse=True)
+def _reset_llm_module_state():
+    """Clear app.core.llm's module globals around every test.
+
+    The Anthropic auth latch and the per-loop SDK client pools are process-wide
+    by design (see the notes in that module). Left alone they make test order
+    load-bearing: one test tripping the latch would silently route later tests
+    to OpenAI.
+    """
+    from app.core import llm
+
+    def _clear() -> None:
+        llm.reset_anthropic_fallback()
+        llm._anthropic_clients.clear()
+        llm._openai_clients.clear()
+        llm._gemini_clients.clear()
+
+    _clear()
+    yield
+    _clear()
+
+
 @pytest.fixture(scope="session")
 def event_loop():
     loop = asyncio.get_event_loop_policy().new_event_loop()

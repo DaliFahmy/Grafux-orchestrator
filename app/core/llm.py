@@ -15,14 +15,21 @@ Design notes:
   of these (JSON is coaxed via prompt + fence-stripping).
 * Missing ``ANTHROPIC_API_KEY`` with a ``claude-*`` selection → graceful fallback to the
   OpenAI default, mirroring the existing no-OpenAI-key fallbacks elsewhere.
+* REJECTED ``ANTHROPIC_API_KEY`` (401/403) → the same fallback, plus a cooldown latch so a
+  24-step agent pays the doomed round-trip once rather than once per step. A key that is
+  present but wrong used to be strictly worse than no key at all: it raised out of the
+  provider branch and killed the caller. Only auth failures latch — a 429/500 is transient
+  and a 400 is a contract break, and neither may be quietly answered by another vendor.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import time
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, TypeVar
 
 from app.config import get_settings
 from app.core.logging import get_logger
@@ -31,12 +38,29 @@ log = get_logger("core.llm")
 
 _DEFAULT_MAX_TOKENS = 4096
 
+_T = TypeVar("_T")
+
 # Shared SDK clients keyed by the running event loop. Like the HTTP client pool, an
 # SDK client binds to the loop it was created on, so the web process gets one reused
 # client while Celery's per-task loops each get their own. One pool per provider.
 _openai_clients: dict[int, tuple[asyncio.AbstractEventLoop, Any]] = {}
 _anthropic_clients: dict[int, tuple[asyncio.AbstractEventLoop, Any]] = {}
 _gemini_clients: dict[int, tuple[asyncio.AbstractEventLoop, Any]] = {}
+
+# Anthropic credentials rejected at runtime. A bad key fails identically on every
+# step of an agent's budget, so the first 401 disables the provider for a while and
+# every later call takes the same fallback a MISSING key already takes.
+#
+# Here rather than on Settings (``get_settings`` is lru_cached, so a latch there
+# would be immortal) and rather than in Redis (the failure is per-process and
+# per-key; a shared latch would let one misconfigured worker downgrade the fleet).
+# Web and each Celery worker therefore latch independently, which is correct.
+#
+# Time-bounded rather than permanent: within one run the two are identical, but a
+# cooldown self-heals after a key rotation without a restart.
+_ANTHROPIC_AUTH_COOLDOWN_S = 900.0
+_anthropic_disabled_until: float = 0.0
+_anthropic_disabled_reason: str = ""
 
 
 def _pooled(
@@ -135,14 +159,91 @@ def _strip_code_fences(text: str) -> str:
     return t.strip()
 
 
+_AUTH_STATUS_CODES = frozenset({401, 403})
+
+
+def _is_anthropic_auth_failure(exc: BaseException) -> bool:
+    """True for a credentials/permission rejection, recognised by SHAPE.
+
+    Deliberately not ``isinstance(exc, anthropic.AuthenticationError)``: this
+    module never imports the SDK at module scope (see ``get_async_anthropic``),
+    the unit tests never install it, and its major version has moved under us
+    before. ``status_code`` is the stable attribute of ``APIStatusError`` across
+    those versions, so it is checked first; the class-name arm is the backstop.
+
+    A test double exercises this by raising anything carrying ``status_code``.
+    """
+    if isinstance(exc, ValueError) and "ANTHROPIC_API_KEY" in str(exc):
+        return True
+    if getattr(exc, "status_code", None) in _AUTH_STATUS_CODES:
+        return True
+    if getattr(getattr(exc, "response", None), "status_code", None) in _AUTH_STATUS_CODES:
+        return True
+    return type(exc).__name__ in ("AuthenticationError", "PermissionDeniedError")
+
+
+def _disable_anthropic(reason: str) -> None:
+    global _anthropic_disabled_until, _anthropic_disabled_reason
+    _anthropic_disabled_until = time.monotonic() + _ANTHROPIC_AUTH_COOLDOWN_S
+    _anthropic_disabled_reason = reason
+
+
+def reset_anthropic_fallback() -> None:
+    """Clear the latch. Public because module globals need an explicit reset in tests."""
+    global _anthropic_disabled_until, _anthropic_disabled_reason
+    _anthropic_disabled_until = 0.0
+    _anthropic_disabled_reason = ""
+
+
 def _anthropic_available(provider: str) -> bool:
-    """True only when the Anthropic branch can actually run (provider + key)."""
+    """True only when the Anthropic branch can actually run (provider + key + not latched)."""
     if provider != "anthropic":
         return False
     if not get_settings().anthropic_api_key:
         log.info("llm_anthropic_key_missing_fallback")
         return False
+    if time.monotonic() < _anthropic_disabled_until:
+        # The one line that keeps steps 2..N of an agent run from re-paying a 401.
+        log.info("llm_anthropic_disabled_fallback", reason=_anthropic_disabled_reason)
+        return False
     return True
+
+
+async def _with_anthropic_fallback(
+    attempt: Callable[[], Awaitable[_T]],
+    fallback: Callable[[], Awaitable[_T]],
+) -> _T:
+    """Run the Anthropic branch; on a credentials failure, latch and re-dispatch.
+
+    ``attempt`` and ``fallback`` return the FINAL value (a str, a parsed dict, a
+    ToolTurn), so per-entry-point post-processing — ``call_llm_json``'s fence
+    stripping and ``json.loads`` — stays inside the closure and a JSONDecodeError
+    still propagates exactly as documented rather than being read as an auth
+    failure.
+
+    Everything that is not an auth failure is re-raised untouched: a 429/500 is
+    transient and the SDK already retries it, and a 400 is the API-contract break
+    the tests exist to catch. Answering either one from a different vendor would
+    hide it.
+    """
+    try:
+        return await attempt()
+    except Exception as exc:
+        if not _is_anthropic_auth_failure(exc):
+            raise
+        log.warning("llm_anthropic_auth_failed_fallback", error=str(exc))
+        _disable_anthropic(str(exc))
+        try:
+            return await fallback()
+        except ValueError as inner:
+            if "OPENAI_API_KEY" not in str(inner):
+                raise
+            raise RuntimeError(
+                "Claude rejected this server's ANTHROPIC_API_KEY and there is no "
+                "OPENAI_API_KEY configured to fall back to. Set a valid "
+                "ANTHROPIC_API_KEY (or OPENAI_API_KEY) on the grafux-orchestrator "
+                "service."
+            ) from exc
 
 
 async def _openai_chat(
@@ -210,20 +311,28 @@ async def call_llm_text(
 ) -> str:
     """Provider-routed text completion. Returns raw assistant text."""
     provider, resolved = resolve_provider(model)
-    if _anthropic_available(provider):
-        return await _anthropic_chat(
-            system_prompt, user_message,
-            model=resolved, max_tokens=max_tokens, want_json=False,
-        )
-    # openai (default) and gemini (phase-1 fallback) both run the OpenAI branch.
+    # openai (default) and gemini (phase-1 fallback) both run the OpenAI branch,
+    # which is also where a rejected Anthropic key lands.
     if provider == "gemini":
         log.info("llm_gemini_text_unimplemented_fallback", requested=resolved)
-    settings = get_settings()
-    openai_model = resolved if provider == "openai" else settings.openai_model
-    return await _openai_chat(
-        system_prompt, user_message,
-        model=openai_model, temperature=temperature, want_json=False,
-    )
+
+    async def _openai() -> str:
+        settings = get_settings()
+        openai_model = resolved if provider == "openai" else settings.openai_model
+        return await _openai_chat(
+            system_prompt, user_message,
+            model=openai_model, temperature=temperature, want_json=False,
+        )
+
+    if _anthropic_available(provider):
+        return await _with_anthropic_fallback(
+            lambda: _anthropic_chat(
+                system_prompt, user_message,
+                model=resolved, max_tokens=max_tokens, want_json=False,
+            ),
+            _openai,
+        )
+    return await _openai()
 
 
 async def call_llm_json(
@@ -240,33 +349,46 @@ async def call_llm_json(
     existing callers already catch, so their graceful fallbacks still fire.
     """
     provider, resolved = resolve_provider(model)
-    if _anthropic_available(provider):
+    if provider == "gemini":
+        log.info("llm_gemini_json_unimplemented_fallback", requested=resolved)
+
+    async def _openai() -> dict:
+        settings = get_settings()
+        openai_model = resolved if provider == "openai" else settings.openai_model
+        raw = await _openai_chat(
+            system_prompt, user_message,
+            model=openai_model, temperature=temperature, want_json=True,
+        )
+        return json.loads(raw or "{}")
+
+    async def _anthropic() -> dict:
+        # Parsing lives INSIDE the attempt so a JSONDecodeError is not mistaken
+        # for a provider failure and silently re-answered by OpenAI.
         raw = await _anthropic_chat(
             system_prompt, user_message,
             model=resolved, max_tokens=max_tokens, want_json=True,
         )
         return json.loads(_strip_code_fences(raw) or "{}")
-    if provider == "gemini":
-        log.info("llm_gemini_json_unimplemented_fallback", requested=resolved)
-    settings = get_settings()
-    openai_model = resolved if provider == "openai" else settings.openai_model
-    raw = await _openai_chat(
-        system_prompt, user_message,
-        model=openai_model, temperature=temperature, want_json=True,
-    )
-    return json.loads(raw or "{}")
+
+    if _anthropic_available(provider):
+        return await _with_anthropic_fallback(_anthropic, _openai)
+    return await _openai()
 
 
 def make_chat_model(model_id: str | None, *, streaming: bool = False):
     """LangChain chat-model factory routed by model id.
 
-    Returns ``ChatAnthropic`` for ``claude-*`` (when a key is configured), else
-    ``ChatOpenAI``. Both expose the same ``.bind_tools`` / ``.ainvoke`` interface used by
-    the agent runtime and workflow engine.
+    Returns ``ChatAnthropic`` for ``claude-*`` (when a key is configured and this
+    process has not seen it rejected), else ``ChatOpenAI``. Both expose the same
+    ``.bind_tools`` / ``.ainvoke`` interface used by the agent runtime and workflow
+    engine.
     """
     provider, resolved = resolve_provider(model_id)
     settings = get_settings()
-    if provider == "anthropic" and settings.anthropic_api_key:
+    # Same gate as the async entry points, so a key this process has already seen
+    # rejected stops being chosen here too. LangChain cannot fail over on its own:
+    # its auth error surfaces later, at .ainvoke, far from this factory.
+    if _anthropic_available(provider):
         from langchain_anthropic import ChatAnthropic
 
         return ChatAnthropic(
@@ -276,7 +398,9 @@ def make_chat_model(model_id: str | None, *, streaming: bool = False):
             streaming=streaming,
         )
     if provider == "anthropic":
-        log.info("llm_anthropic_key_missing_fallback", context="make_chat_model")
+        # The gate above already logged WHY (no key, or latched). This records
+        # that a caller asked for Claude and did not get it.
+        log.info("llm_anthropic_unavailable", context="make_chat_model")
     from langchain_openai import ChatOpenAI
 
     openai_model = resolved if provider == "openai" else settings.openai_model
@@ -674,16 +798,23 @@ async def call_llm_tools(
     a fallback is reported rather than hidden.
     """
     provider, resolved = resolve_provider(model)
-    if _anthropic_available(provider):
-        return await _anthropic_tools_chat(
-            system, messages, declarations,
-            model=resolved, max_tokens=max_tokens, effort=effort,
-        )
     if provider == "gemini":
         log.info("llm_gemini_tools_unimplemented_fallback", requested=resolved)
-    settings = get_settings()
-    openai_model = resolved if provider == "openai" else settings.openai_model
-    return await _openai_tools_chat(
-        system, messages, declarations,
-        model=openai_model, max_tokens=max_tokens, temperature=temperature,
-    )
+
+    async def _openai() -> ToolTurn:
+        settings = get_settings()
+        openai_model = resolved if provider == "openai" else settings.openai_model
+        return await _openai_tools_chat(
+            system, messages, declarations,
+            model=openai_model, max_tokens=max_tokens, temperature=temperature,
+        )
+
+    if _anthropic_available(provider):
+        return await _with_anthropic_fallback(
+            lambda: _anthropic_tools_chat(
+                system, messages, declarations,
+                model=resolved, max_tokens=max_tokens, effort=effort,
+            ),
+            _openai,
+        )
+    return await _openai()

@@ -242,8 +242,54 @@ async def test_an_llm_error_is_reported_not_swallowed(monkeypatch):
     await agent.run()
 
     assert agent.state == "error"
-    assert "upstream exploded" in agent.summary
-    assert canvas.steps("error")
+    # The DETAIL is the step; the SUMMARY is the short verdict the client appends
+    # with the step count. They were once the same string, so one failure printed
+    # twice in the chat.
+    assert "upstream exploded" in canvas.steps("error")[0]["text"]
+    assert agent.summary == "Stopped after an internal error."
+
+
+@pytest.mark.asyncio
+async def test_a_failure_is_not_printed_twice(monkeypatch):
+    """Regression: the error step and the state verdict must not be one string."""
+    canvas = _FakeCanvas()
+
+    async def boom(*a, **kw):
+        raise RuntimeError("upstream exploded")
+
+    monkeypatch.setattr(ba, "call_llm_tools", boom)
+    agent = _agent(canvas)
+
+    await agent.run()
+
+    detail = canvas.steps("error")[0]["text"]
+    verdict = canvas.states()[-1]["summary"]
+    assert detail and verdict
+    assert detail != verdict
+    assert "upstream exploded" not in verdict
+
+
+@pytest.mark.asyncio
+async def test_a_rejected_claude_key_keeps_the_run_going_on_openai(monkeypatch):
+    """The reported bug: a 401 used to end the run at step 1 of 24.
+
+    The provider fallback lives in call_llm_tools, so from here it looks like a
+    model substitution -- which is exactly what the user should be told.
+    """
+    canvas = _FakeCanvas()
+    _script(monkeypatch, [
+        _turn("reading it", [ToolCall("t1", "read_port_value", {"port_name": "code"})],
+              model="gpt-4o"),
+        _turn("", [_finish()], model="gpt-4o"),
+    ])
+
+    agent = _agent(canvas, model="claude-opus-5")
+    await agent.run()
+
+    notes = [s["text"] for s in canvas.steps("note")]
+    assert any("claude-opus-5 is not available here" in n for n in notes)
+    assert agent.state == "finished"
+    assert agent.steps_used > 1
 
 
 @pytest.mark.asyncio

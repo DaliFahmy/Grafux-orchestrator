@@ -44,6 +44,13 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      # Anthropic key — the per-block Agent button defaults to claude-opus-5, and
+      # the workflow engine / agent runtime route claude-* through ChatAnthropic.
+      # Without it (or with a key Anthropic rejects) every claude-* request runs on
+      # OPENAI_MODEL instead, announced in the block's chat.
+      # sync:false => set the secret value in the Render dashboard, not in the repo.
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: OPENAI_MODEL
         value: gpt-4o
       - key: GEMINI_API_KEY
@@ -97,6 +104,9 @@ services:
         sync: false
       - key: OPENAI_API_KEY
         sync: false
+      # See the note on the web service: claude-* falls back to OPENAI_MODEL without this.
+      - key: ANTHROPIC_API_KEY
+        sync: false
       - key: E2B_API_KEY
         sync: false
       - key: TAVILY_API_KEY
@@ -129,6 +139,9 @@ services:
           name: grafux-orchestrator-redis
           property: connectionString
       - key: OPENAI_API_KEY
+        sync: false
+      # See the note on the web service: claude-* falls back to OPENAI_MODEL without this.
+      - key: ANTHROPIC_API_KEY
         sync: false
       - key: TAVILY_API_KEY
         sync: false

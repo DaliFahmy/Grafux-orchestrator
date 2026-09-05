@@ -394,8 +394,11 @@ class BlockAgentLoop:
         except Exception as exc:                      # never let a loop die silently
             log.error("block_agent_failed", block=self.block_name, error=str(exc))
             self.state = "error"
-            self.summary = f"The agent stopped after an internal error: {exc}"
-            await self._step("error", self.summary)
+            # The DETAIL belongs in the step stream (the client renders it "(!) ...");
+            # the SUMMARY is the short verdict the client appends with the step count.
+            # These used to be the same string, so one failure printed twice.
+            await self._step("error", f"The agent stopped after an internal error: {exc}")
+            self.summary = "Stopped after an internal error."
         finally:
             if self.state == "running":
                 self.state = "stopped"
@@ -432,9 +435,10 @@ class BlockAgentLoop:
             await self._announce_model(turn)
 
             if turn.stop_reason == "refusal":
+                # Same detail/verdict split as the error handler above.
                 self.state = "error"
-                self.summary = turn.text
                 await self._step("error", turn.text)
+                self.summary = "The model declined this request."
                 return
 
             if turn.text:

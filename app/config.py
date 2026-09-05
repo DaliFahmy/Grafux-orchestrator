@@ -3,7 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import model_validator
+from pydantic import field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -77,16 +77,41 @@ class Settings(BaseSettings):
     gemini_api_key: str = ""
     gemini_live_model: str = "gemini-3.1-flash-live-preview"
     anthropic_api_key: str = ""               # env: ANTHROPIC_API_KEY
-    # Default Claude model. Used when a caller asks for Anthropic without naming a
-    # version -- notably a block agent whose model dropdown is unset. NOT the
-    # default for an empty model id: that stays on openai_model, which is the
-    # non-regression guarantee for every caller that sends no model at all.
-    anthropic_model: str = "claude-opus-5"
 
     # ── External Services ─────────────────────────────────────────────────────
     e2b_api_key: str = ""
     tavily_api_key: str = ""
     firecrawl_api_key: str = ""
+
+    @field_validator(
+        "openai_api_key", "gemini_api_key", "anthropic_api_key",
+        "e2b_api_key", "tavily_api_key", "firecrawl_api_key",
+        mode="after",
+    )
+    @classmethod
+    def _clean_secret(cls, value: str) -> str:
+        """Strip what a paste adds, and blank what could never authenticate.
+
+        A key pasted into a dashboard field or written into a .env line as
+        ``KEY="sk-..."`` arrives quoted or newline-terminated, and every provider
+        SDK sends it verbatim -- which reads back as a revoked key. Provider
+        agnostic on purpose: fixing this for one vendor is the asymmetry that
+        comes back next quarter.
+
+        A value still carrying control characters after stripping cannot be put
+        in an HTTP header at all, so it is treated as ABSENT: that buys the clean
+        missing-key fallback instead of a crash deep in httpx.
+
+        Deliberately NOT a format check. Key shapes are the vendor's to change,
+        and rejecting a legitimate future one would be a silent permanent
+        downgrade -- worse than a 401, which at least names itself.
+        """
+        cleaned = value.strip()
+        if len(cleaned) >= 2 and cleaned[0] == cleaned[-1] and cleaned[0] in "\"'":
+            cleaned = cleaned[1:-1].strip()
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in cleaned):
+            return ""
+        return cleaned
 
     # ── Internal Service URLs ─────────────────────────────────────────────────
     mcp_service_url: str = "http://localhost:8002"
