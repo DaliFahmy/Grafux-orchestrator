@@ -1843,6 +1843,25 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         outputs=("image", "image_name", "image_description", "improvements", "status"),
         seed_from_desc="prompt",
     ),
+    "plotter": _ScaffoldSpec(
+        category_based=False,
+        inputs=(
+            "data", "chart_type", "title", "x_label", "y_label",
+            # Presentation options, one port each so an upstream block can drive
+            # them. Keep byte-identical to kInputs in generatePlotter().
+            "log_y", "normalize", "show_markers", "trend",
+        ),
+        outputs=(
+            "chart", "series", "point_count",
+            "x_min", "x_max", "y_min", "y_max",
+            "analysis", "status",
+        ),
+        # "data" is what the chart is drawn from, so a spoken description like
+        # "plot the sensor readings" seeds it and the block has something to show
+        # on its first Run rather than an empty frame.
+        seed_map={"data": "data"},
+        seed_from_desc="data",
+    ),
     "location": _ScaffoldSpec(
         category_based=False,
         inputs=("name", "full_address", "street", "postal_code", "city", "country"),
@@ -2597,6 +2616,9 @@ _IMPROVEMENTS_MAX_CHARS = 100_000
 # things to go.  Mirrors the client-side drop order deliberately.
 _IMPROVEMENTS_DROP_ORDER = (
     "log", "sim_output", "reports", "artifacts", "coverage", "testbench",
+    # A plotter's rows, dropped last: the derived stats that precede them still
+    # support a review of scale and shape. Mirrors kDropOrder in edaimprovements.h.
+    "data",
 )
 
 # The buckets the model returns, mapped onto ports by the app.  Named for what

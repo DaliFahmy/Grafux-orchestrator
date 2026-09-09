@@ -57,6 +57,40 @@ async def test_scaffold_location_seeds_full_address_from_description_when_no_see
 
 
 @pytest.mark.asyncio
+async def test_scaffold_plotter_ports_paths_and_data_seed():
+    # The port set here must stay byte-identical to generatePlotter() in the Qt
+    # dialog (unifiedblockcreationdialog.cpp). A block the AI creates and a block
+    # the user creates by hand have to be the same block -- the location spec
+    # already drifted from its dialog this way, and the executor then silently
+    # heals a different shape on the first Run.
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="plotter",
+        block_name="sensor readings",
+        description="Chart the temperature readings",
+        seeds={"data": "x,temp\n1,20\n2,22"},
+    )
+    params = result["tool_calls"][0]["params"]
+    assert params["block_type"] == "plotter"
+    assert params["name"] == "sensor_readings"
+
+    ins = _ports(params, "input")
+    outs = _ports(params, "output")
+    assert set(ins) == {
+        "block_description", "data", "chart_type", "title", "x_label", "y_label",
+        "log_y", "normalize", "show_markers", "trend",
+    }
+    assert set(outs) == {
+        "chart", "series", "point_count",
+        "x_min", "x_max", "y_min", "y_max", "analysis", "status",
+    }
+    # A dictated data seed lands on the data port, beating the description fallback.
+    assert ins["data"]["port_content"] == "x,temp\n1,20\n2,22"
+    # plotter is NOT category-based → flat path, like location and white_board.
+    assert ins["data"]["port_path"] == "data/plotter/sensor_readings/inputs/data.txt"
+    assert ins["block_description"]["port_content"] == "Chart the temperature readings"
+
+
+@pytest.mark.asyncio
 async def test_scaffold_white_board_ports_paths_and_prompt_seed():
     result = await blocks_router.generate_scaffold_payload(
         block_type="white_board",

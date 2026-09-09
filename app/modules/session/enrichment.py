@@ -182,7 +182,7 @@ async def _enrich_code_block(action: dict[str, Any], session_id: str) -> EnrichS
 # Seed keys the model may attach to a create_block action, forwarded to the scaffold
 # builder so the primary input port is pre-filled from the command (e.g. an address or URL).
 _SCAFFOLD_SEED_KEYS = ("address", "url", "gpu_model", "language", "top", "pdk",
-                       "clock_period", "spec", "explanation")
+                       "clock_period", "spec", "explanation", "data")
 
 
 # The claw design ports the devices scaffolder drafts from a description. Secrets
@@ -591,6 +591,7 @@ _ENRICHERS = {
     # Scaffold-only blocks (content produced at Run or by wiring).
     "image": _enrich_scaffold_block,
     "location": _enrich_scaffold_block,
+    "plotter": _enrich_scaffold_block,
     "live": _enrich_scaffold_block,
     "stream": _enrich_scaffold_block,
     "gpu": _enrich_scaffold_block,

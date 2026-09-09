@@ -189,6 +189,9 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "- code: generate source code in a chosen language (set 'language').\n"
                 "- image: generate/edit/search an image (the description is the prompt).\n"
                 "- location: geocode an address and show a map (set 'address').\n"
+                "- plotter: chart numbers as an x/y graph shown in the block; wire a "
+                "block that produces numbers into its 'data' port, or set 'data' to "
+                "the rows themselves. Use for plot/chart/graph/visualise requests.\n"
                 "- live: watch/transcribe a YouTube video or live stream (set 'url').\n"
                 "- stream: broadcast the user's camera/mic and transcribe it.\n"
                 "- white_board: draw the result on a Miro whiteboard embedded in the "
@@ -243,6 +246,13 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
             ),
             "url": _str_prop(
                 "For a 'live' block: the YouTube video or live-stream URL. "
+                "Ignored for other types."
+            ),
+            "data": _str_prop(
+                "For a 'plotter' block: the rows to chart, when the user dictated "
+                "them rather than wiring up a source. CSV (an optional header row "
+                "names the axis and the series), JSON, or one number per line. "
+                "Leave empty when the data will arrive from a connected block. "
                 "Ignored for other types."
             ),
             "memory_mode": _str_prop(
@@ -469,6 +479,8 @@ def function_call_to_action(
             # here is what lets "create a yosys block for my counter on sky130"
             # land with top/pdk already filled instead of empty ports.
             "top", "pdk", "clock_period",
+            # plotter seed: rows the user dictated instead of wiring up a source.
+            "data",
             # testbench / code_hdl seed: the spec the tests and the design share,
             # and the rough explanation the spec_hdl block makes rigorous.
             "spec", "explanation",

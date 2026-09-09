@@ -34,6 +34,7 @@ class BlockType(str, Enum):
     LIVE = "live"
     STREAM = "stream"
     WHITE_BOARD = "white_board"
+    PLOTTER = "plotter"
     # Compute & hardware
     GPU = "gpu"
     CLAW = "claw"
