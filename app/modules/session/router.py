@@ -8,6 +8,10 @@ from typing import Any
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
+from app.core.entitlements import (
+    audit_block_agent_entitlement,
+    may_run_block_agents,
+)
 from app.core.logging import get_logger
 from app.core.security import verify_jwt
 from app.modules.session.canvas_context import (
@@ -93,6 +97,7 @@ async def ws_session(
         session_id=session_id,
         user_id=user_id,
         project_id=project_id,
+        auth_token=token,
     )
     try:
         await session.run()
@@ -114,11 +119,18 @@ class _OrchestratorSession:
         session_id: str,
         user_id: str,
         project_id: str,
+        *,
+        auth_token: str,
     ) -> None:
         self._ws = websocket
         self._session_id = session_id
         self._user_id = user_id
         self._project_id = project_id
+        # Kept so the entitlement check can call the backend AS THE USER on the
+        # first press of a block's Agent button. Keyword-only and with no
+        # default on purpose: a default would let a test fake exercise a path
+        # production never takes, and the gate would rot untested.
+        self._auth_token = auth_token
         # Chat history keyed by conversation. The diagram chat and each block
         # agent tab are separate conversations, and the client already keeps them
         # apart (ChatPanelWidget::m_agentHistoriesByBlockId); a single shared list
@@ -490,6 +502,16 @@ class _OrchestratorSession:
             await _send(self._ws, {"type": "error", "message": "start_block_agent needs a block"})
             return
 
+        # The gate. Checked BEFORE anything is registered in self._agents, which
+        # is also what closes the resume path: _on_agent_user_message only
+        # reaches _resume_block_agent when self._agents.get(block_id) exists, so
+        # refusing here means a later typed message cannot restart the loop
+        # either. (A client-side gate alone would have left that hole open.)
+        if not await may_run_block_agents(self._auth_token, self._user_id):
+            await self._refuse_block_agent(block_id, block_name)
+            return
+        await audit_block_agent_entitlement(self._auth_token, self._user_id)
+
         if data.get("canvas_state"):
             self._canvas_state = data["canvas_state"]
         if data.get("active_blocks"):
@@ -523,6 +545,55 @@ class _OrchestratorSession:
             block=block_name,
             block_type=agent.block_type,
         )
+
+    async def _refuse_block_agent(self, block_id: str, block_name: str) -> None:
+        """Turn away an agent this account may not run.
+
+        TWO frames, deliberately:
+
+        `agent_state` with state="error" is what makes every client -- including
+        builds older than this feature -- unwind cleanly. The client already
+        handles it (ChatPanelWidget::onAgentState): it clears the chat's busy
+        flag, removes the thinking bubble, prints the summary and flips the
+        block's button back from "Stop" to "Agent". Without it the block sits
+        showing "Agent working on ..." forever, because
+        OrchestratorClient::onTextMessage silently DROPS any frame type it does
+        not recognise -- so a lone new-style frame would be total silence.
+
+        The summary must be non-empty: an empty one is discarded before it is
+        ever shown.
+
+        `upgrade_required` is the new frame; a client that knows it opens the
+        upgrade dialog. It is NOT called `agent_upgrade_required`, because
+        test_agent_protocol_parity asserts every `agent_*` handler the client has
+        is produced by a normal run, and a refusal frame never is.
+        """
+        message = (
+            f'Block agents are part of the Agentic plan, so "{block_name}" '
+            "cannot start one on this account."
+        )
+        log.info(
+            "block_agent_refused",
+            session_id=self._session_id,
+            user_id=self._user_id,
+            block=block_name,
+        )
+        await _send(self._ws, {
+            "type": "agent_state",
+            "block_id": block_id,
+            "state": "error",
+            "summary": message,
+            "goal_met": False,
+            "steps_used": 0,
+            "steps_max": 0,
+        })
+        await _send(self._ws, {
+            "type": "upgrade_required",
+            "feature": "block_agent",
+            "plan_required": "agentic",
+            "block_id": block_id,
+            "message": message,
+        })
 
     async def _stop_block_agent(self, block_id: str, *, notify: bool = True) -> None:
         """Stop one agent, or every agent when block_id is empty."""

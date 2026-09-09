@@ -105,7 +105,7 @@ class _Client:
 async def _capture_every_agent_message() -> list[dict]:
     """Run one agent through every message it can produce, and collect them."""
     client = _Client()
-    session = _OrchestratorSession(client, "sid", "uid", "pid")
+    session = _OrchestratorSession(client, "sid", "uid", "pid", auth_token="tok")
     client.attach(session)
 
     script = [

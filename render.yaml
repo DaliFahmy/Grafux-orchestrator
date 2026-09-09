@@ -36,6 +36,17 @@ services:
         sync: false
       - key: BACKEND_URL
         sync: false
+      # Block agents are a paid capability. Ship with enforcement OFF: until
+      # subscriptions are backfilled every account resolves to the free plan, so
+      # turning this on first would disable the Agent button for everyone. Watch
+      # for "entitlement_would_refuse" in the logs, then set it to true.
+      - key: ENFORCE_AGENT_ENTITLEMENT
+        value: "false"
+      # What to do when the backend cannot be reached AND nothing is cached.
+      # "allow" costs some free agent minutes during an outage; "deny" would
+      # break the product for the customers actually paying for it.
+      - key: ENTITLEMENT_FALLBACK
+        value: allow
       - key: MCP_SERVICE_URL
         sync: false
       - key: DEVICES_SERVICE_URL
@@ -98,6 +109,17 @@ services:
         sync: false
       - key: BACKEND_URL
         sync: false
+      # Block agents are a paid capability. Ship with enforcement OFF: until
+      # subscriptions are backfilled every account resolves to the free plan, so
+      # turning this on first would disable the Agent button for everyone. Watch
+      # for "entitlement_would_refuse" in the logs, then set it to true.
+      - key: ENFORCE_AGENT_ENTITLEMENT
+        value: "false"
+      # What to do when the backend cannot be reached AND nothing is cached.
+      # "allow" costs some free agent minutes during an outage; "deny" would
+      # break the product for the customers actually paying for it.
+      - key: ENTITLEMENT_FALLBACK
+        value: allow
       - key: MCP_SERVICE_URL
         sync: false
       - key: DEVICES_SERVICE_URL

@@ -2615,7 +2615,11 @@ _IMPROVEMENTS_MAX_CHARS = 100_000
 # and `rtl` -- the sections the review is actually built from -- are the last
 # things to go.  Mirrors the client-side drop order deliberately.
 _IMPROVEMENTS_DROP_ORDER = (
-    "log", "sim_output", "reports", "artifacts", "coverage", "testbench",
+    "log", "sim_output", "reports", "artifacts", "coverage",
+    # `warnings` and `lint` go before `testbench` because the diagnostics they
+    # carry are now LOCATED AND EXPLAINED on `errors` and `failures`; dropping a
+    # duplicated 4k beats dropping 12k of source nothing else carries.
+    "warnings", "lint", "testbench",
     # A plotter's rows, dropped last: the derived stats that precede them still
     # support a review of scale and shape. Mirrors kDropOrder in edaimprovements.h.
     "data",
@@ -2630,7 +2634,13 @@ _IMPROVEMENTS_DROP_ORDER = (
 # question.  The app treats an empty spec bucket as the answer rather than as a
 # failure, because that port is wired into spec_hdl.feedback and anything
 # written there triggers a revision.
-_IMPROVEMENTS_KEYS = ("design", "tests", "spec", "summary")
+#
+# "diagnosis" is the per-FAILING-TEST answer: one entry per test, naming what the
+# design did and what to change. It is deliberately not the same thing as
+# "design", which groups failures by shared root cause -- eight tests failing on
+# one bug want one design bullet and eight diagnoses, and collapsing either into
+# the other loses something a reader needs.
+_IMPROVEMENTS_KEYS = ("design", "tests", "spec", "diagnosis", "summary")
 
 # Built FROM the keys rather than written out, because the two error paths in
 # run_improvements are the one place _IMPROVEMENTS_KEYS is not iterated, and a
@@ -2709,14 +2719,16 @@ async def generate_improvements_payload(
     user_message = build_improvements_message(
         kind=kind, block_description=block_description, verdict=verdict, run=run
     )
-    # 4096, matching _DEFAULT_MAX_TOKENS in app/core/llm.py.  Three bullet
-    # buckets plus a summary is ~1800 tokens, which fits inside 2048 with under
-    # 15% to spare -- and an overrun here is not graceful degradation, it is a
-    # truncated JSON document that fails to parse and blanks all three ports.
+    # 6144.  Three bullet buckets plus a summary was ~1800 tokens; `diagnosis`
+    # adds one entry per failing test, and at the 20 tests summarize_failures
+    # now reports that is ~1200 more, for ~3000 against a 4096 ceiling.  The
+    # margin was thin enough that a wordy model on a 20-failure regression would
+    # cross it, and an overrun here is not graceful degradation -- it is a
+    # truncated JSON document that fails to parse and blanks every port.
     # Note the ceiling binds only the Anthropic path: _openai_chat does not pass
     # max_tokens at all, so a claude-* run_llm_model was the only way to hit it.
     raw = await _call_openai_json(
-        system_prompt, user_message, temperature=0.3, model=model, max_tokens=4096
+        system_prompt, user_message, temperature=0.3, model=model, max_tokens=6144
     )
     return {key: str(raw.get(key, "") or "").strip() for key in _IMPROVEMENTS_KEYS}
 

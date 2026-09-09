@@ -24,6 +24,20 @@ class Settings(BaseSettings):
     backend_url: str = "http://localhost:8001"
     internal_service_secret: str = "change_me"
 
+    # ── Entitlements (block agents are a paid capability) ─────────────────────
+    # Master switch for the gate. Ships OFF: until subscriptions are backfilled
+    # every account resolves to the free plan, so turning enforcement on first
+    # would disable the Agent button for everyone, owner included. Run with it
+    # off, watch the "would_refuse" logs, then flip it.
+    enforce_agent_entitlement: bool = False
+    # What to do when the backend cannot be reached AND nothing is cached.
+    # "allow" on purpose: an outage costs some free agent minutes, whereas
+    # failing closed kills the product for the customers paying for it, in a way
+    # they cannot tell apart from a bug.
+    entitlement_fallback: Literal["allow", "deny"] = "allow"
+    entitlement_cache_ttl: int = 300         # 5 min — the hot path
+    entitlement_lkg_ttl: int = 7 * 24 * 3600  # 7 days — survives an outage
+
     # ── PostgreSQL ────────────────────────────────────────────────────────────
     database_url: str = (
         "postgresql+asyncpg://postgres:postgres@localhost:5432/grafux_orchestrator"

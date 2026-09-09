@@ -96,10 +96,47 @@ def test_improve_run_section_exists_and_covers_every_kind():
         assert kind in prompt, f"prompt gives no lens for kind={kind}"
 
 
-def test_improve_run_section_declares_the_four_output_keys():
+def test_improve_run_section_declares_the_five_output_keys():
     prompt = get_system_prompt("improve_run")
-    for key in ("design", "tests", "spec", "summary"):
+    for key in ("design", "tests", "spec", "diagnosis", "summary"):
         assert f'"{key}"' in prompt
+
+
+def test_improve_run_pins_the_machine_readable_diagnosis_format():
+    """
+    The app splits this bucket on the "## " lines and files each entry under the
+    test it names, so the three-line shape is a wire format, not a style note.
+    """
+    prompt = get_system_prompt("improve_run")
+    assert "## <exact test name" in prompt
+    assert "WHY:" in prompt and "FIX:" in prompt
+    assert "EXACT test name" in prompt
+
+
+def test_improve_run_keeps_code_out_of_the_diagnosis_bucket():
+    """A FIX names the change in prose. Writing it is [fix_rtl]'s job."""
+    prompt = get_system_prompt("improve_run")
+    assert 'Do not put code, a diff or a corrected file in "diagnosis"' in prompt
+
+
+def test_improve_run_wants_no_diagnosis_when_nothing_failed_a_test():
+    """
+    An environmental failure -- a build error, a missing library -- is not a test
+    diagnosis, and its exact location is already on the `errors` port.
+    """
+    prompt = get_system_prompt("improve_run")
+    assert "Return an EMPTY STRING when the run passed" in prompt
+    assert "never diagnose a test that passed" in prompt
+
+
+def test_improve_run_keeps_diagnosis_and_design_from_duplicating_each_other():
+    """
+    Eight tests failing on one bug want ONE design bullet and eight diagnoses.
+    Collapsing either into the other loses something the reader needs.
+    """
+    prompt = get_system_prompt("improve_run")
+    assert "one entry per failing test" in prompt
+    assert "group the failing tests by likely shared root cause" in prompt
 
 
 def test_improve_run_keeps_the_spec_bucket_off_the_kinds_with_no_contract():
@@ -194,6 +231,32 @@ def test_oversized_evidence_is_capped_and_drops_the_least_specific_first():
     assert "--- sim_output ---" not in msg
 
 
+def test_duplicated_diagnostics_are_dropped_before_unique_source():
+    """
+    `warnings` and `lint` carry Verilator diagnostics that `errors` and
+    `failures` now carry LOCATED and EXPLAINED, so they are the cheapest 8k in
+    the message. `testbench` is 12k of source nothing else holds -- it must
+    outlive them.
+    """
+    msg = blocks_router.build_improvements_message(
+        kind="verilator", verdict="failed",
+        run={
+            "failures": "test_wrap_around: KEEP THIS",
+            "results": '{"total": 6}',
+            "rtl": "R" * 60_000,
+            "testbench": "T" * 30_000,
+            "warnings": "W" * 40_000,
+            "lint": "N" * 40_000,
+            "log": "L" * 40_000,
+        },
+    )
+    assert len(msg) <= blocks_router._IMPROVEMENTS_MAX_CHARS
+    assert "--- warnings ---" not in msg
+    assert "--- lint ---" not in msg
+    assert "--- testbench ---" in msg
+    assert "KEEP THIS" in msg
+
+
 def test_hard_truncation_marks_itself_when_evidence_cannot_be_dropped():
     # `rtl` is not droppable, so an absurd one must still be cut - and say so,
     # because the prompt tells the model not to conclude anything from the cut.
@@ -207,7 +270,7 @@ def test_hard_truncation_marks_itself_when_evidence_cannot_be_dropped():
 # ── payload + endpoint ────────────────────────────────────────────────────────
 
 
-def test_payload_returns_the_four_buckets(monkeypatch):
+def test_payload_returns_every_bucket(monkeypatch):
     fake_llm, seen = _capture()
     monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
     monkeypatch.setattr(blocks_router, "_call_openai_json", fake_llm)
@@ -215,7 +278,7 @@ def test_payload_returns_the_four_buckets(monkeypatch):
     out = _run(blocks_router.generate_improvements_payload(
         block_name="fifo_sim", kind="verilator", verdict="failed", run=FAILING_RUN,
     ))
-    assert set(out) == {"design", "tests", "spec", "summary"}
+    assert set(out) == {"design", "tests", "spec", "diagnosis", "summary"}
     assert "wr_ptr" in out["design"]
     assert "full" in out["tests"]
     assert "REQ-3" in out["spec"]
@@ -291,13 +354,25 @@ def test_unknown_kind_is_accepted_not_rejected(monkeypatch):
 
 def test_missing_model_keys_become_empty_strings(monkeypatch):
     async def sparse(*args, **kwargs):
-        return {"design": "- do the thing"}      # no "tests"/"spec"/"summary"
+        return {"design": "- do the thing"}      # no tests/spec/diagnosis/summary
 
     monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
     monkeypatch.setattr(blocks_router, "_call_openai_json", sparse)
 
     out = _run(blocks_router.generate_improvements_payload(block_name="b", kind="verilator"))
-    assert out == {"design": "- do the thing", "tests": "", "spec": "", "summary": ""}
+    assert out == {"design": "- do the thing", "tests": "", "spec": "",
+                   "diagnosis": "", "summary": ""}
+
+
+def test_diagnosis_is_one_of_the_buckets_every_error_envelope_carries():
+    """
+    _EMPTY_IMPROVEMENTS is built FROM the key tuple precisely so a new bucket
+    cannot go missing from the two error paths in run_improvements -- where a
+    missing bucket leaves "Reviewing the run..." on the block forever.
+    """
+    assert "diagnosis" in blocks_router._IMPROVEMENTS_KEYS
+    assert set(blocks_router._EMPTY_IMPROVEMENTS) == set(blocks_router._IMPROVEMENTS_KEYS)
+    assert all(v == "" for v in blocks_router._EMPTY_IMPROVEMENTS.values())
 
 
 def test_run_llm_model_is_forwarded(monkeypatch):

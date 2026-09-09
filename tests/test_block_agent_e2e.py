@@ -144,7 +144,7 @@ async def test_an_agent_fills_its_empty_spec_and_reports_what_it_did(monkeypatch
     it, wires it, regenerates, checks the result and says so.
     """
     client = _FakeClient()
-    session = _OrchestratorSession(client, "sid", "uid", "pid")
+    session = _OrchestratorSession(client, "sid", "uid", "pid", auth_token="tok")
     client.attach(session)
 
     # The model's side of the conversation. Each turn is chosen by what the
@@ -220,7 +220,7 @@ async def test_an_agent_fills_its_empty_spec_and_reports_what_it_did(monkeypatch
 async def test_the_canvas_the_model_sees_is_refreshed_every_step(monkeypatch):
     """The agent is changing the canvas, so a snapshot taken once would go stale."""
     client = _FakeClient()
-    session = _OrchestratorSession(client, "sid", "uid", "pid")
+    session = _OrchestratorSession(client, "sid", "uid", "pid", auth_token="tok")
     client.attach(session)
 
     contexts: list[str] = []
@@ -258,7 +258,7 @@ async def test_a_disconnect_mid_action_unwinds_the_agent_instead_of_hanging(monk
             return                          # never answers anything
 
     client = _DeafClient()
-    session = _OrchestratorSession(client, "sid", "uid", "pid")
+    session = _OrchestratorSession(client, "sid", "uid", "pid", auth_token="tok")
     client.attach(session)
 
     async def fake_llm(system, messages, declarations, *, model=None, **kw):
@@ -344,7 +344,7 @@ async def test_a_rejected_claude_key_does_not_end_the_run_at_step_one(monkeypatc
     monkeypatch.setattr(llm, "get_async_openai", lambda: openai)
 
     client = _FakeClient()
-    session = _OrchestratorSession(client, "sid", "uid", "pid")
+    session = _OrchestratorSession(client, "sid", "uid", "pid", auth_token="tok")
     client.attach(session)
 
     await session._start_block_agent({

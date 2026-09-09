@@ -18,7 +18,7 @@ class _FakeWS:
 
 def _session() -> tuple[_OrchestratorSession, _FakeWS]:
     ws = _FakeWS()
-    return _OrchestratorSession(ws, "sid", "uid", "pid"), ws
+    return _OrchestratorSession(ws, "sid", "uid", "pid", auth_token="tok"), ws
 
 
 def test_stamp_actions_marks_enrichable_pending_and_ids():
