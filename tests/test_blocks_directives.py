@@ -383,3 +383,146 @@ def test_an_abbreviation_does_not_split_a_sentence():
         (D.KIND_PARAMETER, "DEPTH_X"),
         (D.KIND_FORBIDDEN, "always @(*)"),
     ]
+
+
+# ── The verilator fix ports' own wire format ─────────────────────────────────
+#
+# `fix_rtl` / `fix_tb` / `fix_spec` are wired into code_hdl.feedback,
+# testbench.feedback and spec_hdl.feedback, so their text lands here.  These
+# cases pin the three pieces of that format: the "[must appear: ...]" hint the
+# triage writes about its own order, the "Fixes:" attribution line, and the
+# "X, not Y" contrast that says which of two literals must survive.
+
+FIX_RTL_PORT = """1. In `sync_fifo`, drive `full` from `count == DEPTH`, not `count == DEPTH-1`.
+   [must appear: count == DEPTH]
+   Fixes: test_full_flag_asserts_at_depth, test_write_when_full_is_ignored
+
+2. Reset `rd_ptr` on `rst_n` low; it is currently only reset in the write branch.
+   Fixes: test_reset_clears_pointers
+"""
+
+
+def test_a_must_appear_hint_becomes_a_checkable_literal():
+    """The triage names its own evidence, and the server holds the answer to it.
+
+    That is what makes a repair order enforceable rather than advisory.
+    """
+    found = D.extract_directives("[must appear: count == DEPTH]", source="feedback")
+    assert [(d.kind, d.target) for d in found] == [(D.KIND_LITERAL, "count == DEPTH")]
+
+
+def test_a_must_appear_hint_is_attributed_to_the_order_above_it():
+    """A miss must quote the instruction, not the machinery around it."""
+    found = D.extract_directives(
+        "Drive `full` from the count comparison.\n[must appear: count == DEPTH]",
+        source="feedback",
+    )
+    literals = [d for d in found if d.kind == D.KIND_LITERAL]
+    assert literals and literals[0].text == "Drive `full` from the count comparison."
+
+
+def test_a_must_appear_hint_is_not_rendered_twice():
+    """render_instructions appends its own "[must appear: ...]" suffix.
+
+    Leaving the bracket in the text prints the same demand as prose AND as a
+    hint, which reads as two conflicting instructions.
+    """
+    found = D.extract_directives(
+        "Drive `full` from the count comparison.\n[must appear: count == DEPTH]",
+        source="feedback",
+    )
+    rendered = D.render_instructions(found)
+    assert rendered.count("[must appear:") == 1
+
+
+def test_an_undecidable_must_appear_hint_is_dropped():
+    """A whole pasted line is not something substring presence can honestly judge.
+
+    Same honesty rule as `prose`: a hint the checker cannot decide rejects a
+    CORRECT answer and burns the rounds the real ones need.
+    """
+    long_hint = "x" * 200
+    found = D.extract_directives(f"do it\n[must appear: {long_hint}]", source="feedback")
+    assert not [d for d in found if d.kind == D.KIND_LITERAL]
+
+
+def test_several_must_appear_literals_are_split_on_semicolons():
+    found = D.extract_directives(
+        "[must appear: count == DEPTH; almost_full]", source="feedback"
+    )
+    assert [d.target for d in found if d.kind == D.KIND_LITERAL] == [
+        "count == DEPTH", "almost_full",
+    ]
+
+
+def test_a_fixes_line_is_metadata_not_an_instruction():
+    """It says which failures the order clears; it is not an order of its own.
+
+    Mined as one it reaches the RTL writer as "must appear: a test named
+    test_wrap_around", and [create_code_hdl] forbids that block writing tests.
+    """
+    found = D.extract_directives(
+        "Widen `wr_ptr` to 4 bits.\nFixes: test_wrap_around, test_reset",
+        source="feedback",
+    )
+    assert not [d for d in found if d.kind == D.KIND_TEST]
+    assert not any(d.text.startswith("Fixes:") for d in found)
+
+
+def test_a_contrast_inverts_the_literal_that_follows_it():
+    """"X, not Y" requires X and FORBIDS Y.
+
+    Read as two requirements it demands the very expression the fix was written
+    to remove, and then rejects the design that obeyed.
+    """
+    found = D.extract_directives(
+        "compare `count == DEPTH`, not `count == DEPTH-1`", source="feedback"
+    )
+    assert [(d.kind, d.target) for d in found] == [
+        (D.KIND_LITERAL, "count == DEPTH"),
+        (D.KIND_FORBIDDEN, "count == DEPTH-1"),
+    ]
+
+
+def test_instead_of_inverts_its_tail_as_well():
+    found = D.extract_directives(
+        "use `always_comb` instead of `always @(*)`", source="constraints"
+    )
+    assert [(d.kind, d.target) for d in found] == [
+        (D.KIND_IDENTIFIER, "always_comb"),
+        (D.KIND_FORBIDDEN, "always @(*)"),
+    ]
+
+
+def test_a_bare_not_is_not_a_contrast_marker():
+    """Splitting on " not " would cut "do not use X" into "do" and "use X"."""
+    found = D.extract_directives("do not use `always @(*)`", source="constraints")
+    assert [(d.kind, d.target) for d in found] == [
+        (D.KIND_FORBIDDEN, "always @(*)"),
+    ]
+
+
+def test_a_whole_fix_rtl_port_reads_as_two_orders():
+    found = D.extract_directives(FIX_RTL_PORT, source="feedback")
+    kinds = [(d.kind, d.target) for d in found]
+    assert (D.KIND_LITERAL, "count == DEPTH") in kinds
+    assert (D.KIND_FORBIDDEN, "count == DEPTH-1") in kinds
+    # No test-existence demand reaches the RTL writer.
+    assert not [d for d in found if d.kind == D.KIND_TEST]
+    # Two bullets, one per numbered order - not one per line of the port.
+    assert D.render_instructions(found).count("\n- ") == 2
+
+
+def test_the_fix_rtl_port_rejects_the_design_that_ignored_it():
+    ignored = """module sync_fifo(input clk);
+    assign full = (count == DEPTH-1);
+endmodule"""
+    applied = """module sync_fifo(input clk);
+    assign full = (count == DEPTH);
+    always @(posedge clk) if (!rst_n) rd_ptr <= 0;
+endmodule"""
+    found = D.extract_directives(FIX_RTL_PORT, source="feedback")
+    problems, _ = D.unmet(ignored, found, kind=D.ARTIFACT_RTL, top="sync_fifo")
+    assert problems
+    problems, _ = D.unmet(applied, found, kind=D.ARTIFACT_RTL, top="sync_fifo")
+    assert problems == []

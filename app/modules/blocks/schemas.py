@@ -275,6 +275,14 @@ class ImprovementsRequest(BaseModel):
     run_llm_model: str | None = None
 
 
+# The repair order takes the SAME inputs as the review: the same open evidence
+# dict, the same verdict, the same optional model.  An alias rather than a
+# second class, so the two request shapes cannot drift apart -- what differs
+# between the two endpoints is the prompt and the answer, never the question.
+# Which evidence is sent is the app's decision, not the schema's.
+FixesRequest = ImprovementsRequest
+
+
 class RegenerateToolRequest(BaseModel):
     block_name: str
     prompt: str

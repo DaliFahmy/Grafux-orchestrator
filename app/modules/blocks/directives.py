@@ -164,6 +164,27 @@ _SIGNAL_ALT_RE = re.compile(
 _TEST_NAME_RE = re.compile(r"\b(test_[A-Za-z0-9_]{2,60})\b")
 _REQ_ID_RE = re.compile(r"\b(REQ-\d+)\b")
 
+# "[must appear: count == DEPTH]" - an instruction naming its OWN evidence.
+# render_instructions() writes this syntax into every prompt, and the verilator
+# block's fix_rtl / fix_tb / fix_spec ports write it back: the triage states the
+# literal it is certain must be reproduced verbatim, and that literal is then
+# checked here rather than guessed at.  That is what closes the loop - a repair
+# order the server can actually hold the next artifact to.
+_MUST_APPEAR_RE = re.compile(r"\[must appear:\s*([^\]\n]{1,400})\]", re.IGNORECASE)
+
+#: Longest hint we will accept as decidable.  A whole pasted line is not
+#: something substring presence can honestly judge, and a hint the checker
+#: cannot decide rejects a CORRECT answer while burning the repair rounds the
+#: real ones need.  Same honesty rule as `prose`: when in doubt, stay silent.
+_MUST_APPEAR_MAX = 80
+
+# "Fixes: test_wrap_around, test_reset" - the fix ports' attribution line, which
+# says which failing tests one order clears.  It is METADATA about the order
+# above it, not an instruction of its own: mined as an instruction it renders to
+# the RTL writer as "must appear: a test named test_wrap_around", and
+# [create_code_hdl] forbids that block from writing tests at all.
+_ATTRIBUTION_LINE_RE = re.compile(r"^fixes\s*:", re.IGNORECASE)
+
 # Bullet/numbering noise stripped from the front of an instruction line so the
 # verbatim text reads as a sentence rather than a fragment of markdown.
 _BULLET_RE = re.compile(r"^\s*(?:[-*+•]|\d+[.)]|\[[ xX]\])\s*")
@@ -185,6 +206,27 @@ def _lines(text: str) -> list[str]:
             continue
         out.append(line)
     return out
+
+
+def _must_appear(line: str) -> tuple[list[str], str]:
+    """The ``[must appear: ...]`` literals on a line, and the line without them.
+
+    Mined and REMOVED before anything else looks at the line, for two reasons:
+    the clause splitter must never cut a bracket in half (an HDL literal is full
+    of semicolons, and half a hint is a hint for something nobody asked for),
+    and ``render_instructions`` appends its own "[must appear: ...]" suffix, so
+    a bracket left in the text would be printed twice.
+
+    Literals we cannot decide are dropped rather than guessed at - see
+    ``_MUST_APPEAR_MAX``.
+    """
+    literals: list[str] = []
+    for body in _MUST_APPEAR_RE.findall(line):
+        for item in body.split(";"):
+            item = item.strip().strip("`").strip()
+            if item and len(item) <= _MUST_APPEAR_MAX:
+                literals.append(item)
+    return literals, _MUST_APPEAR_RE.sub(" ", line).strip()
 
 
 def _snippets(line: str) -> list[str]:
@@ -217,15 +259,29 @@ def _tokens(line: str) -> list[str]:
 # prohibition, and reading the whole line as one prohibition forbids `always_ff`.
 # The two-letter lookbehind keeps "e.g." and "i.e." from splitting a sentence in
 # half (the character before that period is another period, not a letter).
+# The subset of those markers that CONTRAST rather than merely separate. What
+# follows one of them is the thing to get RID of, so its sign is inverted:
+# "use `always_comb` instead of `always @(*)`" requires the first and forbids the
+# second, and reading the tail as another requirement demands the very construct
+# the instruction was written to remove -- which then rejects the design that
+# obeyed. ",\s*not\s+" is the phrasing the verilator fix ports produce
+# ("compare `count == DEPTH`, not `count == DEPTH-1`"); a bare " not " is
+# deliberately NOT a marker, or "do not use X" would split into "do" and "use X".
+_CONTRAST_RE = re.compile(r"\s+(?:instead\s+of|rather\s+than)\s+|,\s*not\s+")
+
 _CLAUSE_SPLIT_RE = re.compile(
     r"\s*;\s*"
     r"|\s+(?:instead\s+of|rather\s+than)\s+"
+    r"|,\s*not\s+"
     r"|(?<=[a-z)][a-z)])\.\s+"
 )
 
 
-def _clauses(line: str) -> list[str]:
+def _clauses(line: str) -> list[tuple[str, bool]]:
     """One instruction line split into independently-signed clauses.
+
+    Each clause comes back with a flag saying whether a CONTRAST marker put it
+    on the far side of a "not"/"instead of", in which case its sign is inverted.
 
     ``do not use `always @(*)`; use `always_comb` instead`` is a prohibition AND a
     requirement, and a single sign for the whole line gets one of them backwards
@@ -243,15 +299,20 @@ def _clauses(line: str) -> list[str]:
     def quoted(pos: int) -> bool:
         return any(start <= pos < end for start, end in spans)
 
-    parts: list[str] = []
+    parts: list[tuple[str, bool]] = []
     cursor = 0
+    inverted = False
     for m in _CLAUSE_SPLIT_RE.finditer(line):
         if quoted(m.start()):
             continue
-        parts.append(line[cursor:m.start()])
+        parts.append((line[cursor:m.start()], inverted))
+        # Only the clause DIRECTLY after a contrast marker is inverted; the next
+        # separator decides the one after that from scratch.
+        inverted = bool(_CONTRAST_RE.fullmatch(m.group(0)))
         cursor = m.end()
-    parts.append(line[cursor:])
-    return [p.strip() for p in parts if p.strip()] or [line]
+    parts.append((line[cursor:], inverted))
+    out = [(p.strip(), inv) for p, inv in parts if p.strip()]
+    return out or [(line, False)]
 
 
 def extract_directives(
@@ -286,14 +347,30 @@ def extract_directives(
             add(KIND_LITERAL, snippet, snippet)
     body = _FENCE_BLOCK_RE.sub(" ", body)
 
+    # The order a standalone "[must appear: ...]" line qualifies.  The fix ports
+    # put the hint on its own line under the instruction it belongs to, and a
+    # miss must quote the instruction the user was given, not the machinery
+    # around it.
+    last_order = ""
+
     for line in _lines(body):
         decided = False
 
-        for clause in _clauses(line):
+        hinted, line = _must_appear(line)
+        for literal in hinted:
+            decided |= add(KIND_LITERAL, literal, last_order or line or literal)
+        if not line or _ATTRIBUTION_LINE_RE.match(line):
+            # A hint-only or "Fixes:" line is not itself an instruction, so it
+            # gets no prose fallback: it would print as a bullet saying nothing,
+            # or worse, as an order aimed at the wrong artifact.
+            continue
+        last_order = line
+
+        for clause, inverted in _clauses(line):
             # The verbatim LINE is what the user is shown, even when only one of
             # its clauses produced the directive: a fragment on `improvements`
             # sends them hunting for a sentence they never wrote.
-            forbidding = bool(_FORBID_RE.search(clause))
+            forbidding = bool(_FORBID_RE.search(clause)) != inverted
 
             for name, value in _PARAM_DECL_RE.findall(clause):
                 decided |= add(KIND_PARAMETER, name, line, value)

@@ -49,6 +49,7 @@ from app.modules.blocks.hdl import (
 from app.modules.blocks.schemas import (
     CodeGenerateRequest,
     CodeHdlGenerateRequest,
+    FixesRequest,
     ImageGenerateRequest,
     ImprovementsRequest,
     MergeInputItem,
@@ -2211,11 +2212,17 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
                 "tests", "seed", "collect_coverage", "max_iterations", "defines",
                 "include_dirs", "files", "trace", "sim_args", "verilator_flags",
                 "timeout", "instance_type", "image", "api_keys"),
+        # The improvements_* trio is the REVIEW of a finished run, written
+        # whether it passed or failed.  The fix_* trio is the REPAIR ORDER: the
+        # exact edits that clear the failures in front of you, each failing test
+        # attributed to exactly one of them, and all three empty on a pass.
+        # They are wired to different blocks and answer different questions, so
+        # neither replaces the other.
         outputs=("status", "passed", "results", "failures", "coverage",
                  "coverage_report", "iterations", "sim_output", "lint", "errors",
                  "warnings", "waveform", "rtl", "top", "log", "artifacts",
                  "eda_id", "cost", "improvements_rtl", "improvements_test",
-                 "improvements_spec"),
+                 "improvements_spec", "fix_rtl", "fix_tb", "fix_spec"),
         seed_map={"top": "top"},
         defaults={"mode": "sim", "trace": "1", "timeout": "900",
                   "simulator": "verilator", "collect_coverage": "1",
@@ -3014,6 +3021,116 @@ async def run_improvements(body: ImprovementsRequest, user: CurrentUser) -> dict
     except Exception as exc:  # noqa: BLE001 - deliberately total; see docstring
         log.error("blocks_improvements_error", block=body.block_name, error=str(exc))
         return {**_EMPTY_IMPROVEMENTS, "status": "error", "errors": str(exc)}
+
+
+# ---------------------------------------------------------------------------
+# The repair order: POST /blocks/run/fixes
+# ---------------------------------------------------------------------------
+# A SECOND call rather than three more buckets on [improve_run], for three
+# reasons that each stand alone:
+#
+#   * The app's verify loop must WAIT for fix_rtl before it regenerates the
+#     design, and the improvements call is deliberately fire-and-forget and
+#     suppressed entirely while a loop runs (one review per Run).
+#   * [improve_run] already went 4096 -> 6144 max_tokens for `diagnosis`, and a
+#     truncated want_json answer raises, is caught, and blanks EVERY bucket.
+#     Three more prose buckets in the same document would put the review at risk
+#     to buy the repair order.  Separate documents fail separately.
+#   * The two contracts contradict each other.  The reviewer must never return
+#     empty buckets on a pass and must never write a fix; the triage must return
+#     nothing BUT empty on a pass and must write nothing else.  One persona
+#     holding both rules is how a bullet lands in the wrong bucket.
+#
+# The message assembler is shared: build_improvements_message is already generic
+# over kind/verdict/run and carries the size backstop, and forking it is how the
+# two drift.  Which EVIDENCE is sent is the app's decision
+# (EdaImprovements::fixEvidencePortsFor), not this module's.
+
+# Here the JSON keys ARE the port names, unlike _IMPROVEMENTS_KEYS.  That is
+# safe only because this prompt serves verilator alone -- there is no device or
+# openroad block for which "fix_rtl" would be a nonsense label.
+_FIXES_KEYS = ("fix_rtl", "fix_tb", "fix_spec", "summary")
+
+# Same reasoning as _EMPTY_IMPROVEMENTS: the error paths are the one place the
+# keys are not iterated, and a bucket missing from an error envelope leaves a
+# placeholder standing on the block forever.
+_EMPTY_FIXES = dict.fromkeys(_FIXES_KEYS, "")
+
+
+async def generate_fixes_payload(
+    *,
+    block_name: str,
+    kind: str = "verilator",
+    block_description: str = "",
+    verdict: str = "",
+    run: dict[str, str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Triage a FAILED run.  Returns {"fix_rtl", "fix_tb", "fix_spec", "summary"} or None.
+
+    ``None`` means "no LLM configured", handled exactly as the review is: the run
+    has already been reported to the user and a triage outage must not redden it.
+
+    A verdict other than "failed" short-circuits to empty buckets WITHOUT calling
+    the model.  The app gates too, but only this makes it a guarantee that a
+    passing run is never billed for a repair order it has no use for.
+    """
+    if (verdict or "").strip().lower() != "failed":
+        return dict(_EMPTY_FIXES)
+
+    settings = get_settings()
+    if not (getattr(settings, "openai_api_key", "") or getattr(settings, "anthropic_api_key", "")):
+        return None
+
+    system_prompt = get_system_prompt("triage_failures")
+    if not system_prompt:
+        raise ValueError("triage_failures prompt section is missing from Msg_config")
+
+    user_message = build_improvements_message(
+        kind=kind, block_description=block_description, verdict=verdict, run=run
+    )
+    # 4096.  Three buckets of at most 6 short numbered entries plus a summary is
+    # ~2000 tokens even when every bucket is full, which it never is -- the
+    # attribution rule puts each failing test in exactly one of them.  Lower than
+    # [improve_run]'s 6144 because there is no per-test diagnosis here.
+    # temperature 0.2, not 0.3: this is a repair order, not an opinion.
+    raw = await _call_openai_json(
+        system_prompt, user_message, temperature=0.2, model=model, max_tokens=4096
+    )
+    return {key: str(raw.get(key, "") or "").strip() for key in _FIXES_KEYS}
+
+
+@router.post("/run/fixes")
+async def run_fixes(body: FixesRequest, user: CurrentUser) -> dict:
+    """Triage a failed verilator run into its fix_rtl / fix_tb / fix_spec ports.
+
+    NEVER raises, for the same reason run_improvements never does: the run has
+    already finished and already been reported.  Every failure path returns
+    HTTP 200 with ``status="error"`` and empty buckets -- and the app writes
+    those empties to the ports rather than the error text, because fix_rtl is
+    read straight back out as an instruction.
+    """
+    try:
+        payload = await generate_fixes_payload(
+            block_name=body.block_name,
+            kind=body.kind,
+            block_description=body.block_description,
+            verdict=body.verdict,
+            run=body.run,
+            model=body.run_llm_model,
+        )
+        if payload is None:
+            log.info("blocks_fixes_no_key", block=body.block_name, kind=body.kind)
+            return {
+                **_EMPTY_FIXES,
+                "status": "error",
+                "errors": "no AI key configured, so the failures could not be triaged",
+            }
+        log.info("blocks_fixes_ok", block=body.block_name, kind=body.kind)
+        return {**payload, "status": "ok", "errors": ""}
+    except Exception as exc:  # noqa: BLE001 - deliberately total; see docstring
+        log.error("blocks_fixes_error", block=body.block_name, error=str(exc))
+        return {**_EMPTY_FIXES, "status": "error", "errors": str(exc)}
 
 @router.post("/regenerate/tool")
 async def regenerate_tool_block(

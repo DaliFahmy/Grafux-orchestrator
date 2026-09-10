@@ -219,6 +219,11 @@ _VERILATOR_OUTPUTS = {
     # can be wired somewhere different.  improvements_spec is the outer loop's
     # return leg into spec_hdl.feedback.
     "improvements_rtl", "improvements_test", "improvements_spec",
+    # And split in three again: the REPAIR ORDER.  improvements_* reviews a
+    # finished run whatever its verdict; fix_* says what to edit to clear the
+    # failures in front of you, each failing test attributed to exactly one of
+    # the three, and all three empty on a pass.
+    "fix_rtl", "fix_tb", "fix_spec",
 }
 _YOSYS_INPUTS = {
     "block_description", "rtl", "top", "pdk", "liberty", "synth_flags", "defines",
