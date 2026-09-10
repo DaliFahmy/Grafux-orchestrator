@@ -52,10 +52,13 @@ class CodeHdlGenerateRequest(BaseModel):
     carries what the spec does not: reset style, interface conventions, target
     technology.
 
-    ``feedback`` plus ``previous_code`` switch the request from "write this" to
-    "repair this", selecting the shared [fix_rtl] prompt exactly as the code
-    block does. Both are required: feedback with no design has nothing to repair,
-    and a design with no feedback has nothing to repair it against.
+    ``feedback`` is always honoured: its text reaches the prompt as a MANDATORY
+    INSTRUCTION and the design is checked against it afterwards. What
+    ``previous_code`` adds is the REPAIR MODE — together the two select the shared
+    [fix_rtl] prompt, exactly as the code block does, because feedback with no
+    design has nothing to repair and a design with no feedback has nothing to
+    repair it against. (An instruction that changes the port list stays on the
+    fresh prompt even with both, since [fix_rtl] freezes the interface.)
     """
 
     block_name: str
@@ -131,7 +134,10 @@ class TestbenchGenerateRequest(BaseModel):
     ``spec`` is the behavioural specification the tests are derived from; ``rtl`` is
     only used to extract the module interface (port names) so the generated testbench
     references real signals. ``feedback`` carries a reviewer's notes on a previous
-    testbench (e.g. "test_full_flag expects the wrong latency") for a repair round.
+    testbench (e.g. "test_full_flag expects the wrong latency") for a repair round,
+    and ``previous_testbench`` is the text those notes are about — without it the
+    prompt's "fix what the feedback says and keep everything else" has nothing to
+    keep, and a reviewed run rewrites every test from scratch.
     """
 
     block_name: str
@@ -144,8 +150,12 @@ class TestbenchGenerateRequest(BaseModel):
     coverage_goals: str = ""
     extra_tests: str = ""
     feedback: str = ""
+    # The tests the feedback is a review OF, normally this block's own
+    # ``testbench`` output. Sent alongside feedback, not on an ordinary run.
+    previous_testbench: str = ""
     inputs: list[str] = []
     outputs: list[str] = []
+    run_llm_model: str = ""
 
 
 class ImageGenerateRequest(BaseModel):

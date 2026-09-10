@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from app.modules.blocks import directives as D
 from app.modules.blocks import hdl
 from app.modules.blocks import router as blocks_router
 from app.modules.blocks.schemas import (
@@ -311,7 +312,118 @@ async def test_generate_testbench_payload_feedback_and_previous_reach_the_prompt
     )
     assert "Reviewer feedback" in seen["msg"]
     assert "one cycle too early" in seen["msg"]
-    assert "Previous testbench:" in seen["msg"]
+    assert "Previous testbench (this is the text to revise" in seen["msg"]
+    # The baseline has to precede the review of it, or the feedback comments on
+    # nothing and "keep everything else" has nothing to keep.
+    assert seen["msg"].index("Previous testbench") < seen["msg"].index(
+        "Reviewer feedback"
+    )
+
+
+# ── Instruction compliance ───────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_a_requested_test_the_answer_omits_costs_a_repair_round(monkeypatch):
+    calls = []
+
+    async def fake_llm(system_prompt, user_message, temperature=0.3, *, model=None,
+                       max_tokens=4096):
+        calls.append(user_message)
+        return {"testbench": GOOD_TB, "test_plan": "[]", "explanation": "",
+                "improvements": "", "top": "sync_fifo"}
+
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_llm)
+
+    result = await blocks_router.generate_testbench_payload(
+        block_name="t", spec="spec", rtl=FIFO_RTL, top="sync_fifo",
+        extra_tests="add a test named test_wrap_around",
+    )
+    assert len(calls) == blocks_router._TESTBENCH_REPAIR_ROUNDS + 1
+    assert "MANDATORY INSTRUCTIONS" in calls[0]
+    assert "[must appear: a test named test_wrap_around]" in calls[0]
+    assert "REJECTED" in calls[1]
+
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    # The tests are still written, with the shortfall named next to them.
+    assert outs["testbench"]["port_content"], "tests are never lost over an unmet rule"
+    assert outs["status"]["port_content"] == "needs_review"
+    improvements = outs["improvements"]["port_content"]
+    assert D.UNMET_HEADING in improvements
+    assert "test_wrap_around" in improvements
+
+
+@pytest.mark.asyncio
+async def test_a_testbench_identical_to_the_reviewed_one_is_rejected(monkeypatch):
+    """A review the answer ignored wholesale is not an answer.
+
+    The analogue of validate_rtl_fix's identical-design check, which the testbench
+    path has never had.
+    """
+    calls = []
+
+    async def fake_llm(system_prompt, user_message, temperature=0.3, *, model=None,
+                       max_tokens=4096):
+        calls.append(user_message)
+        return {"testbench": GOOD_TB, "test_plan": "[]", "explanation": "",
+                "improvements": "", "top": "sync_fifo"}
+
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_llm)
+
+    result = await blocks_router.generate_testbench_payload(
+        block_name="t", spec="spec", rtl=FIFO_RTL, top="sync_fifo",
+        feedback="test_reset asserts empty one cycle too early",
+        previous_testbench=GOOD_TB,
+    )
+    assert len(calls) > 1, "an unchanged answer is retried"
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "needs_review"
+    assert "identical to the one the feedback asked you to change" in (
+        outs["improvements"]["port_content"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_run_is_not_faulted_for_repeating_itself(monkeypatch):
+    """Without feedback there is nothing to change, so sameness is not a failure."""
+    async def fake_llm(system_prompt, user_message, temperature=0.3, *, model=None,
+                       max_tokens=4096):
+        return {"testbench": GOOD_TB, "test_plan": "[]", "explanation": "",
+                "improvements": "", "top": "sync_fifo"}
+
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake_llm)
+
+    result = await blocks_router.generate_testbench_payload(
+        block_name="t", spec="spec", rtl=FIFO_RTL, top="sync_fifo",
+        previous_testbench=GOOD_TB,
+    )
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_the_endpoint_forwards_the_previous_testbench(monkeypatch):
+    """It was accepted by the payload function but had no field on the request."""
+    seen = {}
+
+    async def fake_payload(**kwargs):
+        seen.update(kwargs)
+        return {"tool_calls": [{"params": {"input_ports": [], "output_ports": []}}]}
+
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "generate_testbench_payload", fake_payload)
+
+    body = TbRequest(
+        block_name="t", spec="spec", rtl=FIFO_RTL, top="sync_fifo",
+        feedback="test_reset is wrong", previous_testbench=GOOD_TB,
+        run_llm_model="claude-test",
+    )
+    await blocks_router.generate_testbench_block(body, user=None)
+    assert seen["previous_testbench"] == GOOD_TB
+    assert seen["model"] == "claude-test"
 
 
 @pytest.mark.asyncio

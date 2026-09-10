@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from app.modules.blocks import directives as D
 from app.modules.blocks import hdl
 from app.modules.blocks import router as blocks_router
 from app.modules.blocks.schemas import (
@@ -245,8 +246,9 @@ async def test_generate_code_hdl_fills_ports_and_derives_the_interface(monkeypat
 
 
 @pytest.mark.asyncio
-async def test_generate_code_hdl_repairs_once_then_reports(monkeypatch):
+async def test_generate_code_hdl_repairs_then_reports(monkeypatch):
     fake, calls = _responder(
+        {"code": TRUNCATED_RTL, "explanation": "", "improvements": ""},
         {"code": TRUNCATED_RTL, "explanation": "", "improvements": ""},
         {"code": TRUNCATED_RTL, "explanation": "", "improvements": ""},
     )
@@ -256,11 +258,170 @@ async def test_generate_code_hdl_repairs_once_then_reports(monkeypatch):
     result = await blocks_router.generate_code_hdl_payload(
         block_name="sync_fifo", spec=SPEC, top="sync_fifo",
     )
-    assert len(calls) == 2, "one repair round, not more"
+    # Two repair rounds, not more. Shape and instruction compliance are
+    # independent reasons to reject a draft, so one round can only ever fix
+    # whichever of them the rejection happened to name first.
+    assert len(calls) == blocks_router._CODE_HDL_REPAIR_ROUNDS + 1 == 3
     assert "REJECTED" in calls[1][1]
     outs = _ports(result["tool_calls"][0]["params"], "output")
     assert outs["status"]["port_content"] == "needs_review"
     assert outs["improvements"]["port_content"].startswith("Validation: ")
+
+
+# ── Instruction compliance ────────────────────────────────────────────────────
+#
+# The bug these pin: `feedback` used to reach the prompt only alongside a
+# previous design. On a fresh block the text was dropped by the app AND by
+# `build_code_hdl_gen_message`, which had no parameter for it, so "make
+# parameter FIFO_DEPTH = 32" was a guaranteed no-op.
+
+FEEDBACK_32 = "make parameter FIFO_DEPTH = 32;"
+
+RTL_DEPTH_8 = """
+module sync_fifo #(parameter FIFO_DEPTH = 8) (
+    input  wire clk,
+    input  wire rst_n,
+    output wire full
+);
+    assign full = 1'b0;
+endmodule
+"""
+
+RTL_DEPTH_32 = RTL_DEPTH_8.replace("FIFO_DEPTH = 8", "FIFO_DEPTH = 32")
+
+
+@pytest.mark.asyncio
+async def test_feedback_reaches_the_prompt_with_no_previous_design(monkeypatch):
+    fake, calls = _responder({
+        "code": RTL_DEPTH_32, "explanation": "", "improvements": "",
+        "compliance": FEEDBACK_32 + " -> APPLIED: parameter list",
+    })
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_code_hdl_payload(
+        block_name="sync_fifo", spec=SPEC, top="sync_fifo", feedback=FEEDBACK_32,
+    )
+    # One clean call: the instruction arrived and was satisfied.
+    assert len(calls) == 1
+    msg = calls[0][1]
+    assert FEEDBACK_32 in msg
+    assert "MANDATORY INSTRUCTIONS" in msg
+    assert "[must appear: parameter FIFO_DEPTH = 32]" in msg
+    # ...and NOT under the repair path's wording, which would tell the model this
+    # request is a simulator log.
+    assert "Failing tests reported by the simulator" not in msg
+    assert calls[0][0] == blocks_router.get_system_prompt(
+        blocks_router._BLOCK_TYPE_SECTION["code_hdl"]
+    )
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "ok"
+    assert "FIFO_DEPTH = 32" in outs["code"]["port_content"]
+
+
+@pytest.mark.asyncio
+async def test_an_ignored_instruction_costs_a_round_then_lands_on_improvements(monkeypatch):
+    ignored = {"code": RTL_DEPTH_8, "explanation": "", "improvements": "check the flags"}
+    fake, calls = _responder(ignored)  # never applies it
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_code_hdl_payload(
+        block_name="sync_fifo", spec=SPEC, top="sync_fifo", feedback=FEEDBACK_32,
+    )
+    # A draft that ignores the instruction is rejected exactly as a malformed one is.
+    assert len(calls) == blocks_router._CODE_HDL_REPAIR_ROUNDS + 1
+    assert "REJECTED" in calls[1][1]
+
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    # The design is still written — losing a run over an unhonoured instruction
+    # would cost more than the instruction is worth.
+    assert outs["code"]["port_content"].strip().startswith("module sync_fifo")
+    assert outs["status"]["port_content"] == "needs_review"
+    improvements = outs["improvements"]["port_content"]
+    assert D.UNMET_HEADING in improvements
+    assert FEEDBACK_32 in improvements, "the user's own sentence, verbatim"
+    # The model's own notes survive alongside the report.
+    assert "check the flags" in improvements
+
+
+@pytest.mark.asyncio
+async def test_a_port_instruction_stays_on_the_design_prompt(monkeypatch):
+    """[fix_rtl] freezes the port list, so a port request must not go there.
+
+    Otherwise validate_rtl_fix rejects the design that obeyed the instruction and
+    the repair rounds burn on a correct answer.
+    """
+    widened = RTL_DEPTH_8.replace(
+        "output wire full", "output wire full,\n    output wire almost_full"
+    )
+    fake, calls = _responder({"code": widened, "explanation": "", "improvements": ""})
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_code_hdl_payload(
+        block_name="sync_fifo", spec=SPEC, top="sync_fifo",
+        feedback="add an output port called almost_full",
+        previous_code=RTL_DEPTH_8,
+    )
+    assert calls[0][0] == blocks_router.get_system_prompt(
+        blocks_router._BLOCK_TYPE_SECTION["code_hdl"]
+    ), "a port change must not reach the frozen-interface prompt"
+    # The existing design still goes over as a baseline, so the rest is preserved.
+    assert "Current design" in calls[0][1]
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert "almost_full" in outs["interface"]["port_content"]
+    assert outs["status"]["port_content"] == "ok"
+
+
+def test_a_simulator_failure_report_still_selects_the_fixer():
+    """The verification loop's contract: its feedback keeps using [fix_rtl]."""
+    failures = (
+        "## test_full_flag\nWHY: full asserted one cycle early\n"
+        "WHERE: test_sync_fifo.py:42\nLIKELY CAUSE: off-by-one comparison\n"
+    )
+    stated = D.collect_directives({"feedback": failures})
+    assert blocks_router.code_hdl_prompt_section(
+        feedback=failures, previous_code=RTL_DEPTH_8, directives=stated,
+    ) == blocks_router._CODE_FIX_RTL_SECTION
+
+
+@pytest.mark.asyncio
+async def test_constraints_reach_the_repair_prompt(monkeypatch):
+    """They used to be dropped entirely on the fix path."""
+    fixed = RTL_DEPTH_8.replace("assign full = 1'b0;", "assign full = 1'b1;")
+    fake, calls = _responder({
+        "code": fixed, "explanation": "ROOT CAUSE: flag.", "improvements": "",
+        "dependencies": "None", "language": "verilog",
+    })
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    await blocks_router.generate_code_hdl_payload(
+        block_name="sync_fifo", spec=SPEC, top="sync_fifo",
+        feedback="test_full_flag fails: full never asserts",
+        previous_code=RTL_DEPTH_8, constraints="Active-low synchronous reset.",
+    )
+    assert "Active-low synchronous reset." in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_value_only_stated_in_the_spec_is_a_warning(monkeypatch):
+    """The server reading a number out of prose must not reject a design over it."""
+    fake, calls = _responder(
+        {"code": RTL_DEPTH_8, "explanation": "", "improvements": ""}
+    )
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_code_hdl_payload(
+        block_name="sync_fifo", top="sync_fifo",
+        spec="A FIFO with FIFO_DEPTH = 32 entries.",
+    )
+    assert len(calls) == 1, "an inferred rule never costs a repair round"
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "needs_review"
+    assert D.UNMET_HEADING in outs["improvements"]["port_content"]
 
 
 @pytest.mark.asyncio

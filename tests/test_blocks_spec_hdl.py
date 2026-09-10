@@ -4,6 +4,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from app.modules.blocks import directives as D
 from app.modules.blocks import hdl
 from app.modules.blocks import router as blocks_router
 from app.modules.blocks.schemas import (
@@ -445,6 +446,116 @@ async def test_the_model_names_the_top_when_the_user_did_not(monkeypatch):
     assert outs["top"]["port_content"] == "sync_fifo"
 
 
+# ── Instruction compliance ───────────────────────────────────────────────────
+#
+# The prompt has always promised to "honour the DESIGN PARAMETERS exactly", and
+# nothing verified that it had. These pin the verification.
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_width_the_answer_ignores_costs_a_repair_round(monkeypatch):
+    # The answer's parameters say 16, but the user pinned 8.
+    fake, calls = _responder(_payload())
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_spec_hdl_payload(
+        block_name="fifo_spec", explanation=EXPLANATION, data_width="99",
+    )
+    assert len(calls) == blocks_router._SPEC_HDL_REPAIR_ROUNDS + 1
+    assert "REJECTED" in calls[1][1]
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    # The contract is still written; the shortfall is reported next to it.
+    assert outs["spec"]["port_content"], "a spec is never lost over an unmet rule"
+    assert outs["status"]["port_content"] == "needs_review"
+    assert D.UNMET_HEADING in outs["improvements"]["port_content"]
+    assert "Data width" in outs["improvements"]["port_content"]
+
+
+@pytest.mark.asyncio
+async def test_a_pinned_width_the_answer_states_is_accepted(monkeypatch):
+    fake, calls = _responder(_payload())
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_spec_hdl_payload(
+        block_name="fifo_spec", explanation=EXPLANATION, data_width="16",
+    )
+    assert len(calls) == 1
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "ok"
+    assert D.UNMET_HEADING not in outs["improvements"]["port_content"]
+
+
+@pytest.mark.asyncio
+async def test_a_stylistic_parameter_is_not_demanded_back_verbatim(monkeypatch):
+    """A spec honouring async_active_low writes prose, not the token."""
+    fake, calls = _responder(_payload(
+        timing="Asynchronous, active-low reset; rising edge of clk.",
+    ))
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_spec_hdl_payload(
+        block_name="fifo_spec", explanation=EXPLANATION,
+        reset_style="async_active_low",
+    )
+    assert len(calls) == 1, "a prose rule must not be checked as a literal"
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "ok"
+
+
+@pytest.mark.asyncio
+async def test_feedback_reaches_the_prompt_with_no_previous_spec(monkeypatch):
+    """The client used to withhold it entirely until a spec already existed."""
+    fake, calls = _responder(_payload(
+        requirements=REQUIREMENTS + "\nREQ-9: the depth is 32 words.",
+    ))
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    await blocks_router.generate_spec_hdl_payload(
+        block_name="fifo_spec", explanation=EXPLANATION,
+        feedback="the depth must be 32 words, not 8",
+    )
+    msg = calls[0][1]
+    assert "the depth must be 32 words" in msg
+    assert "MANDATORY INSTRUCTIONS" in msg
+    # With no current spec there is nothing to "revise the clauses of", so the
+    # request is framed as what to specify rather than as a fault report.
+    assert "Requested changes" in msg
+    assert "revise the clauses it implicates" not in msg
+
+
+@pytest.mark.asyncio
+async def test_a_revision_still_frames_feedback_as_a_fault_in_the_current_spec(monkeypatch):
+    fake, calls = _responder(_payload())
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    await blocks_router.generate_spec_hdl_payload(
+        block_name="fifo_spec", explanation=EXPLANATION,
+        previous_spec=SPEC_TEXT, feedback="REQ-1 is untestable as worded",
+    )
+    assert "revise the clauses it implicates" in calls[0][1]
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_requirement_number_is_reported(monkeypatch):
+    """Renumbering invalidates every test that cited the old number."""
+    fake, calls = _responder(_payload(requirements="REQ-1: it holds eight words."))
+    monkeypatch.setattr(blocks_router, "get_settings", lambda: _fake_settings())
+    monkeypatch.setattr(blocks_router, "_call_openai_json", fake)
+
+    result = await blocks_router.generate_spec_hdl_payload(
+        block_name="fifo_spec", explanation=EXPLANATION, previous_spec=SPEC_TEXT,
+        feedback="REQ-4 never states the reset value",
+    )
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert outs["status"]["port_content"] == "needs_review"
+    assert "REQ-4" in outs["improvements"]["port_content"]
+
+
 @pytest.mark.asyncio
 async def test_a_rejected_draft_costs_exactly_one_repair_round(monkeypatch):
     bad = _payload(requirements="The FIFO holds eight words.")
@@ -471,7 +582,8 @@ async def test_a_residual_problem_lands_on_improvements_and_needs_review(monkeyp
     result = await blocks_router.generate_spec_hdl_payload(
         block_name="fifo_spec", explanation=EXPLANATION,
     )
-    assert len(calls) == 2  # one draft + one repair, then it gives up
+    # One draft plus every repair round, then it gives up and reports.
+    assert len(calls) == blocks_router._SPEC_HDL_REPAIR_ROUNDS + 1 == 3
     outs = _ports(result["tool_calls"][0]["params"], "output")
     assert outs["status"]["port_content"] == "needs_review"
     improvements = outs["improvements"]["port_content"]

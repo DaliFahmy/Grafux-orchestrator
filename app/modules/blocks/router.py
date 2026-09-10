@@ -23,11 +23,23 @@ from app.core.constants import (
 from app.core.llm import _strip_code_fences, call_llm_json, call_llm_text
 from app.core.logging import get_logger
 from app.dependencies import CurrentUser
+from app.modules.blocks.directives import (
+    Directive,
+    collect_directives,
+    compliance_gaps,
+    has_interface_directive,
+    parameter_directives_from_spec,
+    pinned_parameter_directives,
+    render_instructions,
+    render_unmet,
+    unmet,
+)
 from app.modules.blocks.hdl import (
     compose_full_spec,
     design_interface,
     hdl_family,
     infer_top_module,
+    interface_signals,
     module_ports,
     validate_hdl_design,
     validate_rtl_fix,
@@ -510,6 +522,8 @@ def build_code_fix_message(
     previous_code: str,
     feedback: str,
     description: str = "",
+    constraints: str = "",
+    directives: list[Directive] | None = None,
     problems: list[str] | None = None,
 ) -> str:
     """Assemble the user message the [fix_rtl] prompt expects.
@@ -527,6 +541,11 @@ def build_code_fix_message(
     ]
     if (description or "").strip():
         parts.append(f"What this design is meant to do:\n{description.strip()}")
+    if (constraints or "").strip():
+        parts.append(
+            "Constraints that still apply (reset style, interface conventions, "
+            f"target technology):\n{constraints.strip()}"
+        )
     parts.append(
         "Current code (this is what failed; return a corrected version of THIS "
         f"design):\n{previous_code.strip()}"
@@ -535,6 +554,9 @@ def build_code_fix_message(
         "Failing tests reported by the simulator (fix the DESIGN; the tests are "
         f"correct and must not change):\n{feedback.strip()}"
     )
+    instructions = render_instructions(directives or [])
+    if instructions:
+        parts.append(instructions)
     if problems:
         parts.append(
             "Your previous attempt was REJECTED for these reasons; return a "
@@ -833,7 +855,7 @@ _TESTBENCH_FRAMEWORKS = ("cocotb",)
 # One repair round when the first draft fails validation (invented signals, no
 # @cocotb.test, syntax error). One, not many: a second failure means the spec or
 # interface is the problem and the user should see it on the improvements port.
-_TESTBENCH_REPAIR_ROUNDS = 1
+_TESTBENCH_REPAIR_ROUNDS = 2
 
 
 def build_testbench_gen_message(
@@ -848,6 +870,7 @@ def build_testbench_gen_message(
     extra_tests: str = "",
     feedback: str = "",
     previous_testbench: str = "",
+    directives: list[Directive] | None = None,
     problems: list[str] | None = None,
 ) -> str:
     """Assemble the user message the [create_testbench] prompt expects.
@@ -874,13 +897,22 @@ def build_testbench_gen_message(
         parts.append(f"Coverage goals:\n{coverage_goals.strip()}")
     if extra_tests.strip():
         parts.append(f"Extra tests requested:\n{extra_tests.strip()}")
+    # The baseline comes BEFORE the feedback that criticises it, so the review
+    # reads as a comment on the text above it rather than on nothing.
+    if previous_testbench.strip():
+        parts.append(
+            "Previous testbench (this is the text to revise; keep every test the "
+            "feedback does not implicate, including its name, so a citation of it "
+            f"stays valid):\n{previous_testbench.strip()}"
+        )
     if feedback.strip():
         parts.append(
             "Reviewer feedback on the previous testbench (fix the TESTS accordingly):\n"
             f"{feedback.strip()}"
         )
-    if previous_testbench.strip():
-        parts.append(f"Previous testbench:\n{previous_testbench.strip()}")
+    instructions = render_instructions(directives or [])
+    if instructions:
+        parts.append(instructions)
     if problems:
         parts.append(
             "The previous draft was REJECTED for these reasons; return a corrected testbench:\n- "
@@ -987,8 +1019,21 @@ async def generate_testbench_payload(
 
     Flow: extract the module's port list from ``rtl`` (never the body) → ask the
     [create_testbench] prompt for spec-derived cocotb tests → validate (Python parses,
-    has a @cocotb.test, references only real ports) → one repair round on failure →
+    has a @cocotb.test, references only real ports) → repair rounds on failure →
     surface any residual problems on ``improvements`` and mark ``status``.
+
+    **Instruction compliance.** ``feedback``, ``extra_tests`` and
+    ``coverage_goals`` are mined for checkable directives (a named test, a
+    required or forbidden construct, a literal snippet), shown to the model as
+    MANDATORY INSTRUCTIONS, and checked against the tests it returns.
+
+    ``previous_testbench`` is the text a review is a review OF. Without it the
+    prompt's "fix exactly what the feedback says and keep everything else" is
+    unsatisfiable - there is nothing to keep - so a reviewed run silently
+    rewrote every test from scratch, losing the ones nobody complained about
+    along with the names any spec citation used. When feedback IS supplied and
+    the answer comes back byte-identical to that baseline, it is rejected: the
+    same reasoning as :func:`hdl.validate_rtl_fix`'s identical-design check.
 
     Returns ``None`` when no LLM key is configured so callers fall back to a scaffold.
     """
@@ -1013,7 +1058,15 @@ async def generate_testbench_payload(
     if not system_prompt:
         raise ValueError("create_testbench prompt section missing from Msg_config")
 
+    all_directives = collect_directives({
+        "feedback": feedback,
+        "extra_tests": extra_tests,
+        "coverage_goals": coverage_goals,
+    })
+    baseline = (previous_testbench or "").strip()
+
     problems: list[str] = []
+    warnings: list[str] = []
     result: dict = {}
     testbench = ""
     draft = previous_testbench
@@ -1021,13 +1074,27 @@ async def generate_testbench_payload(
         user_message = build_testbench_gen_message(
             block_name=name, top=top_name, ports=ports, spec=spec_text, framework=fw,
             style=style, coverage_goals=coverage_goals, extra_tests=extra_tests,
-            feedback=feedback, previous_testbench=draft, problems=problems or None,
+            feedback=feedback, previous_testbench=draft,
+            directives=all_directives, problems=problems or None,
         )
         result = await _call_openai_json(
             system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
         )
         testbench = _strip_code_fences(str(result.get("testbench", "")))
         problems = validate_testbench(testbench, rtl, top_name)
+        if baseline and feedback.strip() and testbench.strip() == baseline:
+            problems.append(
+                "the returned testbench is identical to the one the feedback "
+                "asked you to change"
+            )
+        unmet_problems, unmet_warnings = unmet(
+            testbench, all_directives, kind="python",
+        )
+        unmet_problems.extend(
+            compliance_gaps(str(result.get("compliance", "")), all_directives)
+        )
+        problems = [*problems, *unmet_problems]
+        warnings = list(unmet_warnings)
         if not problems:
             break
         log.warning(
@@ -1035,13 +1102,23 @@ async def generate_testbench_payload(
         )
         draft = testbench
 
+    missed, missed_warnings = unmet(testbench, all_directives, kind="python")
+    missed.extend(compliance_gaps(str(result.get("compliance", "")), all_directives))
+    notes = [n for n in problems if n not in missed]
+    notes.extend(w for w in warnings if w not in missed_warnings)
+
     improvements = str(result.get("improvements", "")).strip()
-    if problems:
+    unmet_section = render_unmet(missed, missed_warnings)
+    if unmet_section:
+        improvements = unmet_section + ("\n" + improvements if improvements else "")
+    if notes:
         improvements = (
-            "Validation: " + "; ".join(problems)
+            "Validation: " + "; ".join(notes)
             + ("\n" + improvements if improvements else "")
         )
-    status = "ok" if not problems else "needs_review"
+    status = (
+        "needs_review" if notes or missed or missed_warnings else "ok"
+    )
     out_top = str(result.get("top", "")).strip() or top_name
 
     return _generated_envelope(
@@ -1123,8 +1200,10 @@ async def generate_testbench_block(
             coverage_goals=body.coverage_goals,
             extra_tests=body.extra_tests,
             feedback=body.feedback,
+            previous_testbench=body.previous_testbench,
             inputs=body.inputs,
             outputs=body.outputs,
+            model=body.run_llm_model or None,
         )
         if result is None:
             return _simple_testbench_response(body, error="AI not configured")
@@ -1140,7 +1219,7 @@ async def generate_testbench_block(
 # One repair round, for the same reason code_hdl takes one: a second failure
 # means the EXPLANATION is the problem, and the user is better served by seeing
 # that on the improvements port than by paying for another round of it.
-_SPEC_HDL_REPAIR_ROUNDS = 1
+_SPEC_HDL_REPAIR_ROUNDS = 2
 
 # The design parameters a hardware spec always needs and prose always leaves
 # implicit. Each is a port on the block; this table is what turns a filled port
@@ -1184,6 +1263,7 @@ def build_spec_hdl_gen_message(
     design: str = "",
     previous_spec: str = "",
     feedback: str = "",
+    directives: list[Directive] | None = None,
     problems: list[str] | None = None,
 ) -> str:
     """Assemble the user message the [create_spec_hdl] prompt expects.
@@ -1219,16 +1299,55 @@ def build_spec_hdl_gen_message(
             f"stable):\n{previous_spec.strip()}"
         )
     if feedback.strip():
-        parts.append(
-            "Feedback saying the current specification is wrong, incomplete or "
-            f"ambiguous (revise the clauses it implicates, keep the rest):\n{feedback.strip()}"
-        )
+        # Two framings, because feedback arrives in two situations. With a
+        # current spec it is evidence that spec is wrong; with none, it is
+        # simply what the user wants specified, and telling the model to
+        # "revise the clauses it implicates" would point it at nothing.
+        if previous_spec.strip():
+            parts.append(
+                "Feedback saying the current specification is wrong, incomplete "
+                "or ambiguous (revise the clauses it implicates, keep the "
+                f"rest):\n{feedback.strip()}"
+            )
+        else:
+            parts.append(
+                "Requested changes (instructions from this block's feedback "
+                f"port; the specification must reflect them):\n{feedback.strip()}"
+            )
+    instructions = render_instructions(directives or [])
+    if instructions:
+        parts.append(instructions)
     if problems:
         parts.append(
             "Your previous draft was REJECTED for these reasons; return a corrected "
             "specification:\n- " + "\n- ".join(problems)
         )
     return "\n\n".join(parts)
+
+
+def _spec_hdl_unmet(
+    result: dict, spec_text: str, directives: list[Directive]
+) -> tuple[list[str], list[str]]:
+    """``(problems, warnings)`` for the instructions a spec answer does not satisfy.
+
+    A specification is spread across ports, so compliance is checked against all
+    of the prose ones at once: a pinned width may be stated in ``spec``, tabulated
+    in ``parameters`` or recorded in ``assumptions``, and any of those honours the
+    instruction. ``interface`` is excluded from the prose blob and used for its
+    signal names instead, so a port directive is checked against the port list
+    rather than against a JSON string that happens to contain the word.
+    """
+    if not directives:
+        return [], []
+    prose = "\n".join(str(result.get(key, "")) for key in (
+        "requirements", "parameters", "timing", "assumptions", "signals_analysis",
+        "explanation",
+    ))
+    body = spec_text + "\n" + prose
+    return unmet(
+        body, directives, kind="spec",
+        signals=interface_signals(str(result.get("interface", ""))),
+    )
 
 
 async def generate_spec_hdl_payload(
@@ -1260,9 +1379,19 @@ async def generate_spec_hdl_payload(
     [create_spec_hdl] writes the contract from the explanation and the pinned
     design parameters -> :func:`validate_spec` checks it is traceable (enumerated
     requirements), machine-readable (the interface parses) and self-consistent
-    (the signals discussed exist) -> one repair round on failure -> residual
+    (the signals discussed exist) -> repair rounds on failure -> residual
     problems and every warning land on ``improvements`` with
     ``status=needs_review``.
+
+    **Instruction compliance.** The pinned design parameters, ``constraints`` and
+    ``feedback`` are mined for checkable directives, shown to the model as
+    MANDATORY INSTRUCTIONS, and then checked against the contract it returns; an
+    unmet one costs a repair round. A pinned width was previously only *asked*
+    for - the prompt promised to honour it and nothing verified that it had. On a
+    revision, every ``REQ-<n>`` the feedback cites must still be present, which
+    is what finally enforces the prompt's stable-numbering rule. Anything still
+    unmet is written verbatim to ``improvements`` under
+    :data:`directives.UNMET_HEADING`.
 
     ``feedback`` does not switch prompts the way it does on a code block. The
     output contract is identical either way - a whole specification, never a
@@ -1315,6 +1444,16 @@ async def generate_spec_hdl_payload(
         "protocol": protocol, "throughput": throughput,
     })
 
+    # The pinned parameters go through their own extractor: "Data width: 16" is a
+    # human label with a number, so the number is the only checkable part, while a
+    # "Further parameters: FIFO_DEPTH = 32" line names its parameter and is
+    # checked by name. A stylistic value ("async_active_low") stays prose - a spec
+    # honouring it writes "asynchronous, active-low" rather than echoing the token.
+    all_directives = [
+        *pinned_parameter_directives(param_lines),
+        *collect_directives({"feedback": feedback, "constraints": constraints}),
+    ]
+
     problems: list[str] = []
     warnings: list[str] = []
     result: dict = {}
@@ -1324,7 +1463,7 @@ async def generate_spec_hdl_payload(
             block_name=name, explanation=text, language=lang,
             top=pinned_top or name, parameters=param_lines, constraints=constraints,
             design=design, previous_spec=draft_spec, feedback=feedback,
-            problems=problems or None,
+            directives=all_directives, problems=problems or None,
         )
         result = await _call_openai_json(
             system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
@@ -1338,6 +1477,13 @@ async def generate_spec_hdl_payload(
             design=design,
             top=pinned_top,
         )
+        unmet_problems, unmet_warnings = _spec_hdl_unmet(result, spec_text,
+                                                        all_directives)
+        unmet_problems.extend(
+            compliance_gaps(str(result.get("compliance", "")), all_directives)
+        )
+        problems = [*problems, *unmet_problems]
+        warnings = [*warnings, *unmet_warnings]
         if not problems:
             break
         log.warning(
@@ -1352,8 +1498,16 @@ async def generate_spec_hdl_payload(
     if not spec_text.strip() and (previous_spec or "").strip():
         spec_text = previous_spec.strip()
 
-    notes = list(problems) + list(warnings)
+    missed, missed_warnings = _spec_hdl_unmet(result, spec_text, all_directives)
+    missed.extend(compliance_gaps(str(result.get("compliance", "")), all_directives))
+    notes = [
+        n for n in list(problems) + list(warnings)
+        if n not in missed and n not in missed_warnings
+    ]
     improvements = str(result.get("improvements", "")).strip()
+    unmet_section = render_unmet(missed, missed_warnings)
+    if unmet_section:
+        improvements = unmet_section + ("\n" + improvements if improvements else "")
     if notes:
         improvements = (
             "Validation: " + "; ".join(notes) + ("\n" + improvements if improvements else "")
@@ -1374,7 +1528,9 @@ async def generate_spec_hdl_payload(
         "assumptions": str(result.get("assumptions", "")),
         "explanation": str(result.get("explanation", "")),
         "improvements": improvements,
-        "status": "needs_review" if notes else "ok",
+        "status": (
+            "needs_review" if notes or missed or missed_warnings else "ok"
+        ),
         "errors": "",
     }
     spec_outputs["full_spec"] = compose_full_spec(spec_outputs)
@@ -1526,7 +1682,10 @@ async def generate_spec_hdl_block(
 # unparsable interface). One, not many: a second failure means the spec is the
 # problem and the user should see it on the improvements port rather than pay for
 # another round of the same mistake.
-_CODE_HDL_REPAIR_ROUNDS = 1
+# Two rounds, not one: shape (does it parse, is it named right) and compliance
+# (did it honour the instructions) are independent reasons to reject a draft,
+# and a single round can only ever fix whichever one it was told about first.
+_CODE_HDL_REPAIR_ROUNDS = 2
 
 # Said on the improvements port when the design is VHDL. Not a silent empty
 # interface: Verilator is Verilog/SystemVerilog only, so a VHDL design cannot
@@ -1540,14 +1699,29 @@ _VHDL_LOOP_NOTE = (
 )
 
 
-def code_hdl_prompt_section(*, feedback: str, previous_code: str) -> str:
+def code_hdl_prompt_section(
+    *, feedback: str, previous_code: str, directives: list[Directive] | None = None
+) -> str:
     """[fix_rtl] when there is a design AND a failure to repair it against, else [create_code_hdl].
 
     Simpler than :func:`code_prompt_section` because a code_hdl block is always
     HDL — the language guard that stops a Python `code` block from reaching the
     RTL fixer has nothing to guard here.
+
+    One extra condition: an instruction that changes the module's PORT LIST keeps
+    the request on [create_code_hdl], with the existing design offered as a
+    baseline. [fix_rtl]'s frozen interface is enforced by
+    :func:`hdl.validate_rtl_fix`, so a design that obeyed "add an ``almost_full``
+    output" would be REJECTED there for interface drift — the repair rounds would
+    burn on a correct answer and the instruction could never be satisfied. Only
+    port-list changes qualify (:data:`directives.INTERFACE_KINDS`): a parameter or
+    width change survives ``validate_rtl_fix`` untouched, since it compares port
+    names and order only. Verilator's ``failures`` text yields no such directive,
+    so the verification loop keeps using [fix_rtl] exactly as before.
     """
     if not (feedback or "").strip() or not (previous_code or "").strip():
+        return _BLOCK_TYPE_SECTION["code_hdl"]
+    if has_interface_directive(directives or []):
         return _BLOCK_TYPE_SECTION["code_hdl"]
     return _CODE_FIX_RTL_SECTION
 
@@ -1559,9 +1733,23 @@ def build_code_hdl_gen_message(
     top: str,
     spec: str,
     constraints: str = "",
+    feedback: str = "",
+    previous_code: str = "",
+    directives: list[Directive] | None = None,
     problems: list[str] | None = None,
 ) -> str:
-    """Assemble the user message the [create_code_hdl] prompt expects."""
+    """Assemble the user message the [create_code_hdl] prompt expects.
+
+    ``feedback`` is labelled as a REQUEST, never as a simulator log: this
+    builder is reached whenever the block has no previous design to repair, or
+    when the instruction changes the interface, and in both cases the text is
+    someone asking for something rather than a failing-test report. The fix
+    path's wording lives in :func:`build_code_fix_message` and stays there.
+
+    ``previous_code`` is a BASELINE, not something to repair. Offering it stops
+    a revision from silently rewriting the parts of a working design the
+    instruction never mentioned.
+    """
     parts = [
         f"Block name: {block_name}",
         f"Hardware description language: {language or 'systemverilog'}",
@@ -1573,6 +1761,20 @@ def build_code_hdl_gen_message(
             "Constraints (reset style, interface conventions, target technology):\n"
             f"{constraints.strip()}"
         )
+    if (previous_code or "").strip():
+        parts.append(
+            "Current design (this block's existing code; revise it, changing only "
+            "what the instructions and the spec require and keeping the rest intact):\n"
+            f"{previous_code.strip()}"
+        )
+    if (feedback or "").strip():
+        parts.append(
+            "Requested changes (instructions from this block's feedback port, "
+            f"not a simulator log):\n{feedback.strip()}"
+        )
+    instructions = render_instructions(directives or [])
+    if instructions:
+        parts.append(instructions)
     if problems:
         parts.append(
             "Your previous draft was REJECTED for these reasons; return a corrected design:\n- "
@@ -1600,12 +1802,26 @@ async def generate_code_hdl_payload(
 
     Fresh flow: [create_code_hdl] writes a synthesizable design from the spec →
     :func:`validate_hdl_design` checks it parses, is not truncated, is named what
-    was asked and is not a testbench → one repair round on failure → residual
+    was asked and is not a testbench → repair rounds on failure → residual
     problems and any synthesizability warnings land on ``improvements``.
 
-    Repair flow (``feedback`` + ``previous_code``): the shared [fix_rtl] prompt,
-    validated by :func:`validate_rtl_fix`, which enforces what the prompt only
-    asks for — the module name and port list stay byte-identical.
+    Repair flow (``feedback`` + ``previous_code``, and no interface-changing
+    instruction): the shared [fix_rtl] prompt, validated by
+    :func:`validate_rtl_fix`, which enforces what the prompt only asks for — the
+    module name and port list stay byte-identical.
+
+    **Instruction compliance.** ``feedback`` and ``constraints`` are mined for
+    checkable directives, which are shown to the model as MANDATORY INSTRUCTIONS
+    and then checked against the design it returns; an unmet one is a ``problem``,
+    so it costs a repair round exactly as a syntax error does. ``feedback`` now
+    reaches the prompt even with no ``previous_code`` — it used to be dropped on
+    that path, which made a fresh block silently ignore everything on the port.
+    Numeric parameter values found in the ``spec`` are checked too, but only as
+    warnings: that is the server reading prose, not the user stating a rule.
+    Anything still unmet after the last round is written verbatim to
+    ``improvements`` under :data:`directives.UNMET_HEADING` with
+    ``status=needs_review``. The design itself is always written: losing a run
+    over an unhonoured instruction would cost more than the instruction is worth.
 
     ``top`` and ``interface`` are always parsed from the design that was actually
     emitted, never read from the model's JSON: [fix_rtl]'s output contract has no
@@ -1628,12 +1844,24 @@ async def generate_code_hdl_payload(
         )
     family = hdl_family(lang)
 
-    fixing = bool((feedback or "").strip() and (previous_code or "").strip())
     spec_text = (spec or "").strip() or (description or "").strip()
+
+    # Binding instructions (the user said so) and inferred ones (the server read
+    # a number out of the spec). Feedback comes first: it is the most recent and
+    # most specific thing anyone said about this block.
+    stated = collect_directives({"feedback": feedback, "constraints": constraints})
+    inferred = parameter_directives_from_spec(spec)
+    all_directives = [*stated, *inferred]
+
+    section = code_hdl_prompt_section(
+        feedback=feedback, previous_code=previous_code, directives=stated,
+    )
+    # `fixing` is derived FROM the chosen section rather than recomputed, so an
+    # interface-changing instruction cannot select [create_code_hdl] and then be
+    # assembled by the fix-message builder.
+    fixing = section == _CODE_FIX_RTL_SECTION
     if not fixing and not spec_text:
         raise ValueError("a spec (or description) is required to generate a design")
-
-    section = code_hdl_prompt_section(feedback=feedback, previous_code=previous_code)
     system_prompt = get_system_prompt(section)
     if not system_prompt:
         raise ValueError(f"{section} prompt section missing from Msg_config")
@@ -1657,12 +1885,15 @@ async def generate_code_hdl_payload(
             user_message = build_code_fix_message(
                 block_name=name, language=lang, top=top_name, ports=frozen_ports,
                 previous_code=draft, feedback=feedback, description=spec_text,
+                constraints=constraints, directives=all_directives,
                 problems=problems or None,
             )
         else:
             user_message = build_code_hdl_gen_message(
                 block_name=name, language=lang, top=top_name, spec=spec_text,
-                constraints=constraints, problems=problems or None,
+                constraints=constraints, feedback=feedback,
+                previous_code=previous_code, directives=all_directives,
+                problems=problems or None,
             )
         result = await _call_openai_json(
             system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
@@ -1672,6 +1903,16 @@ async def generate_code_hdl_payload(
             problems, warnings = (validate_rtl_fix(code, previous_code, top_name), [])
         else:
             problems, warnings = validate_hdl_design(code, lang, top_name)
+        # Compliance sits alongside shape: an unmet instruction is as good a
+        # reason to ask again as an unbalanced `begin`.
+        unmet_problems, unmet_warnings = unmet(
+            code, all_directives, kind="rtl", top=top_name,
+        )
+        unmet_problems.extend(
+            compliance_gaps(str(result.get("compliance", "")), stated)
+        )
+        problems = [*problems, *unmet_problems]
+        warnings = [*warnings, *unmet_warnings]
         if not problems:
             break
         log.warning(
@@ -1687,12 +1928,21 @@ async def generate_code_hdl_payload(
         code = previous_code
 
     out_top, ports = design_interface(code, lang, top_name)
-    notes = list(problems)
+
+    # An unmet instruction is separated from a validation note: the user needs to
+    # see WHICH of their own sentences the run failed to apply, in their words,
+    # not as one clause of a semicolon-joined "Validation:" line.
+    missed, missed_warnings = unmet(code, all_directives, kind="rtl", top=top_name)
+    missed.extend(compliance_gaps(str(result.get("compliance", "")), stated))
+    notes = [n for n in problems if n not in missed]
     if family == "vhdl":
         notes.append(_VHDL_LOOP_NOTE)
-    notes.extend(warnings)
+    notes.extend(w for w in warnings if w not in missed_warnings)
 
     improvements = str(result.get("improvements", "")).strip()
+    unmet_section = render_unmet(missed, missed_warnings)
+    if unmet_section:
+        improvements = unmet_section + ("\n" + improvements if improvements else "")
     if notes:
         improvements = (
             "Validation: " + "; ".join(notes) + ("\n" + improvements if improvements else "")
@@ -1717,7 +1967,9 @@ async def generate_code_hdl_payload(
             "language": lang,
             "explanation": str(result.get("explanation", "")),
             "improvements": improvements,
-            "status": "needs_review" if notes else "ok",
+            "status": (
+                "needs_review" if notes or missed or missed_warnings else "ok"
+            ),
             "errors": "",
         },
         extra_inputs=inputs,
