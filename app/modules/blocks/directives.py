@@ -1,8 +1,9 @@
 """
 Pure helpers that turn instruction text into checkable directives, and check them.
 
-The three HDL block types (``code_hdl``, ``spec_hdl``, ``testbench``) all take
-free-form instruction text on input ports — ``feedback`` above all, plus
+The three HDL block types (``code_hdl``, ``spec_hdl``, ``testbench``) and the
+language-agnostic ``code_fix`` block all take free-form instruction text on input
+ports — ``feedback`` above all, plus
 ``constraints``, ``extra_tests``, ``coverage_goals`` and spec_hdl's pinned design
 parameters. Handing that text to a model is necessary but not sufficient: a
 prompt is a request, and the run has to be able to say afterwards whether the
@@ -542,6 +543,9 @@ def render_instructions(directives: list[Directive]) -> str:
 ARTIFACT_RTL = "rtl"
 ARTIFACT_SPEC = "spec"
 ARTIFACT_PYTHON = "python"
+# A program in an unknown language (the code_fix block). Narrower than
+# ARTIFACT_PYTHON, which assumes cocotb: see the per-kind skips in :func:`unmet`.
+ARTIFACT_CODE = "code"
 
 
 def _normalize(text: str) -> str:
@@ -549,13 +553,83 @@ def _normalize(text: str) -> str:
     return re.sub(r"\s+", " ", text or "").strip()
 
 
-def _strip_for(artifact: str, kind: str) -> str:
+# Comment syntax by language, for ARTIFACT_CODE. Stripping matters in BOTH
+# directions: a rule answered by ``// use snake_case`` has not been answered, and
+# a rule forbidding ``eval`` is not broken by the word appearing in a comment.
+# There is no language-agnostic way to strip, which is the whole reason this table
+# exists: ``//`` is floor division in Python, ``#`` opens a preprocessor directive
+# in C and C++, and ``--`` is a decrement operator in C but a comment in SQL. A
+# stripper that guessed would delete real code and report a rule as unmet that the
+# program satisfies; a stripper that did nothing would report a prohibition as
+# broken by its own mention in a comment. So it is done per language, and an
+# unrecognised one strips nothing and gives up the decision instead -- see
+# :func:`unmet`, which drops ``forbidden`` in that case.
+_CODE_COMMENT_SLASH = "slash"  # // line, /* */ block
+_CODE_COMMENT_HASH = "hash"    # # line
+_CODE_COMMENT_DASH = "dash"    # -- line
+
+_SLASH_LANGS = (
+    "c", "c++", "cpp", "cxx", "cc", "c#", "csharp", "java", "javascript", "js",
+    "jsx", "typescript", "ts", "tsx", "go", "golang", "rust", "rs", "swift",
+    "kotlin", "kt", "scala", "dart", "php", "objectivec", "objc", "groovy",
+    "zig", "solidity", "glsl", "verilog", "systemverilog", "sv", "css", "scss",
+)
+_HASH_LANGS = (
+    "python", "py", "python3", "ruby", "rb", "bash", "sh", "shell", "zsh",
+    "fish", "perl", "pl", "r", "yaml", "yml", "toml", "elixir", "julia",
+    "powershell", "ps1", "makefile", "make", "dockerfile", "awk", "tcl",
+    "nim", "crystal", "coffeescript", "cmake",
+)
+_DASH_LANGS = (
+    "sql", "plsql", "mysql", "postgresql", "postgres", "sqlite", "tsql",
+    "lua", "haskell", "hs", "elm", "ada", "vhdl",
+)
+
+_CODE_COMMENT_STYLE: dict[str, str] = {
+    **dict.fromkeys(_SLASH_LANGS, _CODE_COMMENT_SLASH),
+    **dict.fromkeys(_HASH_LANGS, _CODE_COMMENT_HASH),
+    **dict.fromkeys(_DASH_LANGS, _CODE_COMMENT_DASH),
+}
+
+_HASH_COMMENT_RE = re.compile(r"#[^\n]*")
+_LANG_KEY_RE = re.compile(r"[^a-z0-9+#]+")
+
+
+def code_comment_style(language: str) -> str:
+    """Which comment syntax ``language`` uses, or "" when it is unknown or unstated.
+
+    "" is a real answer and not a failure: it means this module cannot tell code
+    from commentary in the artifact, and callers are expected to give up the checks
+    that depend on that rather than guess (see :func:`unmet`).
+    """
+    key = _LANG_KEY_RE.sub("", (language or "").strip().lower())
+    return _CODE_COMMENT_STYLE.get(key, "")
+
+
+def _strip_code_comments(artifact: str, language: str) -> str:
+    """``artifact`` with ``language``'s comments blanked; unchanged if unrecognised."""
+    style = code_comment_style(language)
+    if style == _CODE_COMMENT_SLASH:
+        return _strip_comments(artifact or "")
+    if style == _CODE_COMMENT_HASH:
+        return _HASH_COMMENT_RE.sub(" ", artifact or "")
+    if style == _CODE_COMMENT_DASH:
+        return _strip_comments_vhdl(artifact or "")
+    return artifact or ""
+
+
+def _strip_for(artifact: str, kind: str, language: str = "") -> str:
     """``artifact`` with its comments removed, so a rule met only in a comment fails.
 
     A design that answers "use ``always_ff``" by writing ``// use always_ff`` has
     not answered it, and a design that answers "do not use ``$display``" is not
     condemned by the word appearing in a comment.
+
+    ``language`` is used only for ``ARTIFACT_CODE``, whose language is whatever the
+    user wired up; every other kind knows its own syntax from the kind alone.
     """
+    if kind == ARTIFACT_CODE:
+        return _strip_code_comments(artifact, language)
     if kind == ARTIFACT_PYTHON:
         return re.sub(r"#[^\n]*", " ", artifact or "")
     if kind == ARTIFACT_SPEC:
@@ -582,6 +656,35 @@ def _parameter_met(body: str, name: str, value: str) -> bool:
     return bool(loose.search(body))
 
 
+def _assignment_met(body: str, name: str, value: str) -> bool:
+    """``name`` assigned ``value`` somewhere in a program of any language.
+
+    The HDL check (:func:`_parameter_met`) wants a ``parameter``/``localparam``
+    declaration, which no Python or Go program has. What survives translation is the
+    assignment itself: ``MAX_ROWS = 500``, ``MAX_ROWS := 500``, ``const MAX_ROWS =
+    500``, ``#define MAX_ROWS 500``. Each of those is accepted, and a bare mention of
+    the name is not -- the instruction pinned a value, not a word.
+
+    A qualified name counts: ``config.MAX_ROWS = 500`` and ``self.MAX_ROWS = 500``
+    both set MAX_ROWS to 500, so the lookbehind excludes only word characters (which
+    would otherwise let ``FOO_MAX_ROWS`` match) and not the dot.
+    """
+    pattern = re.compile(
+        r"(?<!\w)"
+        + re.escape(name)
+        + r"\b\s*(?::?=|:)\s*\(?\s*"
+        + re.escape(value)
+        + r"(?![\w.])"
+    )
+    if pattern.search(body):
+        return True
+    # C-style object-like macro: no operator between the name and the value.
+    define = re.compile(
+        r"#\s*define\s+" + re.escape(name) + r"\s+\(?\s*" + re.escape(value) + r"(?![\w.])"
+    )
+    return bool(define.search(body))
+
+
 def _spec_parameter_met(body: str, name: str, value: str) -> bool:
     """``name`` and ``value`` on the same line of a specification."""
     for line in (body or "").splitlines():
@@ -592,6 +695,25 @@ def _spec_parameter_met(body: str, name: str, value: str) -> bool:
     return False
 
 
+# Directive kinds with no decidable meaning in a program of unknown language, so
+# never reported against an ARTIFACT_CODE body. ``signal`` is a module port,
+# ``test`` a cocotb coroutine and ``requirement`` a spec id -- checking any of them
+# here would reject correct Python for not being Verilog.
+#
+# ``parameter`` is deliberately NOT in this set. "set ``MAX_ROWS`` to 500" is the
+# commonest shape a code-repair instruction takes, and it is decidable in any
+# language: an assignment of that name to that value. What is HDL-specific is only
+# the ``parameter``/``localparam`` KEYWORD the RTL check insists on, so
+# ARTIFACT_CODE uses :func:`_assignment_met` instead -- see :func:`unmet`.
+#
+# The three kinds listed already fall through today, because every branch in
+# :func:`unmet` that implements them is guarded on a specific kind. Naming them
+# here makes that INTENDED rather than incidental: a later edit that relaxed one of
+# those guards would otherwise start checking Verilog rules against Python without
+# anyone choosing it.
+_UNDECIDABLE_IN_CODE = frozenset({KIND_SIGNAL, KIND_TEST, KIND_REQUIREMENT})
+
+
 def unmet(
     artifact: str,
     directives: list[Directive],
@@ -599,6 +721,7 @@ def unmet(
     kind: str,
     top: str = "",
     signals: list[str] | None = None,
+    language: str = "",
 ) -> tuple[list[str], list[str]]:
     """``(problems, warnings)`` for the directives this artifact does not satisfy.
 
@@ -609,11 +732,22 @@ def unmet(
 
     ``signals`` is the artifact's port list when the caller already knows it
     (spec_hdl parses its own ``interface``); for RTL it is derived here.
+
+    ``language`` applies to ``ARTIFACT_CODE`` only and decides whether comments can
+    be told from code. When it is unknown, ``forbidden`` directives are dropped as
+    well: a prohibition is the one check that FAILS on a mention, so an unstripped
+    comment saying "no longer uses eval" would be read as still using it - a false
+    violation, which is binding and costs a repair round. The other three checks
+    fail on an absence, so leaving comments in can only ever let one pass, and a
+    missed violation costs nothing.
     """
     if not directives:
         return [], []
 
-    body = _strip_for(artifact, kind)
+    body = _strip_for(artifact, kind, language)
+    undecidable = _UNDECIDABLE_IN_CODE
+    if kind == ARTIFACT_CODE and not code_comment_style(language):
+        undecidable = undecidable | {KIND_FORBIDDEN}
     ports: list[str] = list(signals) if signals is not None else []
     if kind == ARTIFACT_RTL and signals is None and (artifact or "").strip():
         ports = module_ports(artifact, top or "")
@@ -625,11 +759,16 @@ def unmet(
         missed = False
         if d.kind == KIND_PROSE:
             continue
+        if kind == ARTIFACT_CODE and d.kind in undecidable:
+            continue
         if d.kind == KIND_PARAMETER:
             if kind == ARTIFACT_SPEC:
                 missed = not _spec_parameter_met(body, d.target, d.value)
             elif kind == ARTIFACT_RTL:
                 missed = not _parameter_met(body, d.target, d.value)
+            elif kind == ARTIFACT_CODE:
+                # No `parameter` keyword outside HDL; the assignment is the evidence.
+                missed = not _assignment_met(body, d.target, d.value)
             else:
                 # A parameter instruction has no meaning for a testbench, which
                 # drives ports rather than declaring parameters.

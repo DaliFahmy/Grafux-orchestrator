@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import difflib
 import hashlib
 import json
 import time
@@ -24,6 +25,7 @@ from app.core.llm import _strip_code_fences, call_llm_json, call_llm_text
 from app.core.logging import get_logger
 from app.dependencies import CurrentUser
 from app.modules.blocks.directives import (
+    ARTIFACT_CODE,
     Directive,
     collect_directives,
     compliance_gaps,
@@ -47,6 +49,7 @@ from app.modules.blocks.hdl import (
     validate_testbench,
 )
 from app.modules.blocks.schemas import (
+    CodeFixGenerateRequest,
     CodeGenerateRequest,
     CodeHdlGenerateRequest,
     FixesRequest,
@@ -2064,6 +2067,383 @@ async def generate_code_hdl_block(
         return _simple_code_hdl_response(body, error=str(exc))
 
 
+# ── code_fix block (AI code repair, any language) ────────────────────────────
+#
+# The counterpart to the code block. That one WRITES a program from a requirement,
+# which makes it the wrong tool for mending one: handed an existing program it
+# regenerates from the description and throws the original away. This one is
+# always repairing -- a program on `code`, a written order on `fix`, the corrected
+# program out -- and it freezes nothing, which is what separates it from the HDL
+# repair mode ([fix_rtl], reached from code/code_hdl) whose whole safety property
+# is a module interface it keeps byte-identical.
+
+# Two repair rounds, for the same reason code_hdl takes two: shape (did it return
+# a program, did it actually change anything) and compliance (did it honour the
+# instructions) are independent reasons to reject a draft, and one round can only
+# ever fix whichever one it was told about first.
+_CODE_FIX_BLOCK_REPAIR_ROUNDS = 2
+
+# The diff is a reading aid; the artifact is the whole program on `code`. A repair
+# of a large file can produce a diff longer than anyone will read in a port, and
+# the app writes every port it is handed, so the cap belongs here rather than at
+# the other end.
+_CODE_CHANGE_MAX_CHARS = 20000
+_CODE_CHANGE_TRUNCATED = "... (diff truncated; the whole program is on the code port)"
+
+
+def code_change_diff(before: str, after: str) -> str:
+    """A unified diff of the repair, computed here rather than asked of the model.
+
+    This is the one part of the answer that can be derived mechanically, so it is
+    not left to the model. A plausible-looking diff that does not match the code it
+    claims to describe is worse than no diff at all, because it is the thing a
+    reviewer reads INSTEAD of the code.
+
+    Empty when nothing changed: an empty port says "no change" more plainly than a
+    diff with no hunks in it does.
+    """
+    if not (before or "").strip() or not (after or "").strip():
+        return ""
+    if before == after:
+        return ""
+    diff = "\n".join(
+        difflib.unified_diff(
+            before.splitlines(),
+            after.splitlines(),
+            fromfile="before",
+            tofile="after",
+            lineterm="",
+        )
+    )
+    if not diff:
+        return ""
+    if len(diff) > _CODE_CHANGE_MAX_CHARS:
+        diff = diff[:_CODE_CHANGE_MAX_CHARS].rstrip() + "\n" + _CODE_CHANGE_TRUNCATED
+    return diff
+
+
+def code_fix_shape_problems(code: str, original: str) -> list[str]:
+    """Problems with a returned repair that are visible without reading it.
+
+    Both of these fail in a way that LOOKS like success, which is why they are
+    checked rather than trusted. An empty ``code`` means the app overwrites a
+    working program with nothing. A byte-identical one means the model reported
+    applying an instruction it did not apply -- the one failure mode the user
+    cannot detect by looking at the block.
+    """
+    if not (code or "").strip():
+        return [
+            "the answer contained no code; return the whole corrected program in "
+            "the \"code\" key"
+        ]
+    if code.strip() == (original or "").strip():
+        return [
+            "the program you returned is byte-identical to the one you were given, "
+            "so the fix was not applied; make the change the instruction asks for"
+        ]
+    return []
+
+
+def build_code_fix_block_message(
+    *,
+    block_name: str,
+    code: str,
+    fix: str,
+    language: str = "",
+    description: str = "",
+    directives: list[Directive] | None = None,
+    problems: list[str] | None = None,
+) -> str:
+    """Assemble the user message the [create_code_fix] prompt expects.
+
+    Deliberately carries no INTERFACE line, unlike :func:`build_code_fix_message`
+    which serves the HDL [fix_rtl] prompt: nothing here is frozen, because nothing
+    downstream of a general program is validated against a port list.
+
+    A blank ``language`` is passed through as an instruction to INFER it rather
+    than defaulted to python. Guessing would make the prompt assert, with
+    authority, something it does not know -- and the code itself already says what
+    language it is written in.
+    """
+    lang = (language or "").strip()
+    parts = [
+        f"Block name: {block_name}",
+        (
+            f"Programming language: {lang}"
+            if lang
+            else "Programming language: not stated - infer it from the code below "
+                 "and keep the program in that same language"
+        ),
+    ]
+    if (description or "").strip():
+        parts.append(
+            "What this program is for (background; the fix below is the actual "
+            f"instruction):\n{description.strip()}"
+        )
+    parts.append(
+        "Current code (this is what must be repaired; return a corrected version "
+        f"of THIS program):\n{code.strip()}"
+    )
+    parts.append(
+        "The fix to apply (this is the instruction: do exactly what it asks and "
+        f"leave everything it does not mention alone):\n{fix.strip()}"
+    )
+    instructions = render_instructions(directives or [])
+    if instructions:
+        parts.append(instructions)
+    if problems:
+        parts.append(
+            "Your previous attempt was REJECTED for these reasons; return a "
+            "corrected program:\n- " + "\n- ".join(problems)
+        )
+    return "\n\n".join(parts)
+
+
+async def generate_code_fix_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    code: str = "",
+    fix: str = "",
+    language: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Generate a code_fix block envelope via AI: repair ``code`` per ``fix``.
+
+    Both inputs are required. A fix with no program has nothing to edit and a
+    program with no fix has nothing to do, and in either case the honest answer is
+    to refuse rather than to invent the missing half -- which is what a block that
+    quietly "regenerated" would be doing.
+
+    **Instruction compliance.** ``fix`` is mined for checkable directives
+    (:mod:`app.modules.blocks.directives`), shown to the model as MANDATORY
+    INSTRUCTIONS, and then checked against the program it returns with
+    ``kind=ARTIFACT_CODE``. An unmet one is a ``problem`` and costs a repair round
+    exactly as an empty answer does, because on this block the instruction IS the
+    task: a repair that ignored it has failed in a way that looks like success.
+    Only the language-agnostic checks apply -- a literal, a value, a required or
+    forbidden identifier -- since a parameter declaration or a cocotb test name has
+    no meaning in an unknown language. Anything still unmet after the last round is
+    written verbatim to ``improvements`` under :data:`directives.UNMET_HEADING` with
+    ``status=needs_review``; the program is still written, because losing a repair
+    over an unhonoured clause costs more than the clause is worth.
+
+    ``code_change`` is derived by :func:`code_change_diff` from the two versions,
+    never read from the model's JSON.
+
+    Returns ``None`` when no LLM key is configured, so callers fall back to a
+    scaffold (the stream path) or to a port-complete stub (the REST endpoint).
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        return None
+
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+    # Kept VERBATIM rather than stripped: a program's trailing newline is part of
+    # the file (POSIX tools expect it), and the echoed input port is what the user
+    # reads back as "this is what I handed it". Emptiness and
+    # changed-or-not are decided on the stripped forms instead -- the message
+    # builder and code_fix_shape_problems both do that for themselves.
+    original = code or ""
+    order = fix or ""
+    if not original.strip():
+        raise ValueError("code_fix needs the program to repair on its 'code' input port")
+    if not order.strip():
+        raise ValueError("code_fix needs a repair instruction on its 'fix' input port")
+    # Not normalized to a canonical name and not defaulted: it is echoed into the
+    # prompt as the user typed it, and blank means "infer it", which is better
+    # information than a wrong guess.
+    lang = (language or "").strip()
+
+    section = _BLOCK_TYPE_SECTION["code_fix"]
+    system_prompt = get_system_prompt(section)
+    if not system_prompt:
+        raise ValueError(f"{section} prompt section missing from Msg_config")
+
+    # Everything on `fix` is binding: it is the user (or a reviewer) stating what
+    # must change, not the server inferring something from prose. So there is no
+    # `inferred` list here, unlike code_hdl's spec-derived parameters.
+    stated = collect_directives({"fix": order.strip()})
+
+    problems: list[str] = []
+    warnings: list[str] = []
+    result: dict = {}
+    fixed = ""
+    # The language the compliance checks are run against. The request's value wins;
+    # a blank one is filled from what the model says it wrote, because the checks
+    # need it to tell code from comments and the model was asked to infer it. An
+    # unknown language is handled honestly inside `unmet` rather than guessed at.
+    check_lang = lang
+    for attempt in range(_CODE_FIX_BLOCK_REPAIR_ROUNDS + 1):
+        user_message = build_code_fix_block_message(
+            block_name=name,
+            code=original,
+            fix=order,
+            language=lang,
+            description=description,
+            directives=stated,
+            problems=problems or None,
+        )
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
+        )
+        fixed = _strip_code_fences(str(result.get("code", "")))
+        check_lang = lang or str(result.get("language", "")).strip()
+        problems = code_fix_shape_problems(fixed, original)
+        unmet_problems, warnings = unmet(
+            fixed, stated, kind=ARTIFACT_CODE, language=check_lang,
+        )
+        unmet_problems.extend(compliance_gaps(str(result.get("compliance", "")), stated))
+        problems = [*problems, *unmet_problems]
+        if not problems:
+            break
+        log.warning(
+            "code_fix_validation_failed",
+            block=name, attempt=attempt, problems=problems,
+        )
+
+    # A repair that produced nothing must not blank the program it was meant to
+    # mend: the app overwrites every port it is handed, so an empty `code` here is
+    # data loss rather than a failed run. Same rule as _simple_code_hdl_response.
+    if not fixed.strip():
+        fixed = original
+
+    # The requested language is trusted over the returned one (the code is what the
+    # user wired up around), but a disagreement is worth a line in the log: it is
+    # usually the model having rewritten the program in a language nobody asked for.
+    returned_lang = str(result.get("language", "")).strip()
+    if lang and returned_lang and _normalize_lang(returned_lang) != _normalize_lang(lang):
+        log.warning(
+            "code_fix_language_mismatch", block=name, requested=lang, returned=returned_lang,
+        )
+
+    # An unmet instruction is kept apart from a shape note: the user needs to see
+    # WHICH of their own sentences the run failed to apply, in their own words,
+    # rather than as one clause of a semicolon-joined "Validation:" line.
+    missed, missed_warnings = unmet(
+        fixed, stated, kind=ARTIFACT_CODE, language=check_lang,
+    )
+    missed.extend(compliance_gaps(str(result.get("compliance", "")), stated))
+    notes = [n for n in problems if n not in missed]
+    notes.extend(w for w in warnings if w not in missed_warnings)
+
+    improvements = str(result.get("improvements", "")).strip()
+    unmet_section = render_unmet(missed, missed_warnings)
+    if unmet_section:
+        improvements = unmet_section + ("\n" + improvements if improvements else "")
+    if notes:
+        improvements = (
+            "Validation: " + "; ".join(notes) + ("\n" + improvements if improvements else "")
+        )
+
+    return _generated_envelope(
+        block_type="code_fix",
+        name=name,
+        category=cat,
+        description=description,
+        inputs={"code": original, "fix": order, "language": lang},
+        outputs={
+            "code": fixed,
+            "code_change": code_change_diff(original, fixed),
+            "explanation": str(result.get("explanation", "")),
+            "improvements": improvements,
+            "status": "needs_review" if notes or missed or missed_warnings else "ok",
+            "errors": "",
+        },
+        extra_inputs=inputs,
+        extra_outputs=outputs,
+    )
+
+
+def _simple_code_fix_block_response(
+    body: CodeFixGenerateRequest, error: str = ""
+) -> dict:
+    """Fallback: a port-complete code_fix block with no repair applied.
+
+    The incoming program is ECHOED onto the ``code`` output rather than left empty.
+    This is not cosmetic: the app writes every port this envelope carries over the
+    block's own, so a blank ``code`` here would wipe whatever was wired in every
+    time a key was missing or a request failed -- the run meant to mend the program
+    would destroy it. ``code_change`` is empty because nothing changed, which is
+    exactly what an empty diff means.
+    """
+    name = body.block_name.replace(" ", "_")
+    # Verbatim, for the reason generate_code_fix_payload keeps it verbatim.
+    kept = body.code or ""
+    note = (
+        "The program was returned unchanged: code generation is not configured, so "
+        "the requested fix could not be applied."
+        if kept.strip() else ""
+    )
+    return _generated_envelope(
+        block_type="code_fix",
+        name=name,
+        category=body.category or "general",
+        description=(body.description or "").strip(),
+        inputs={
+            "code": kept,
+            "fix": body.fix or "",
+            "language": (body.language or "").strip(),
+        },
+        outputs={
+            "code": kept,
+            "code_change": "",
+            "explanation": "",
+            "improvements": note,
+            "status": "error" if error else "",
+            "errors": error,
+        },
+        extra_inputs=body.inputs,
+        extra_outputs=body.outputs,
+    )
+
+
+@router.post("/generate/code_fix")
+async def generate_code_fix_block(
+    body: CodeFixGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Repair the program on a code_fix block's ``code`` port per its ``fix`` port.
+
+    Serves the manual UnifiedWindow creation path and the app's Run/Regenerate
+    buttons. Without a key, or on any failure, returns a port-complete stub whose
+    ``errors``/``status`` ports say why -- and which never blanks the program it
+    was handed.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        log.info(
+            "blocks_generate_code_fix_fallback", reason="no_llm_key", block=body.block_name,
+        )
+        return _simple_code_fix_block_response(body, error="AI not configured")
+    try:
+        result = await generate_code_fix_payload(
+            block_name=body.block_name,
+            category=body.category,
+            description=body.description,
+            code=body.code,
+            fix=body.fix,
+            language=body.language,
+            inputs=body.inputs,
+            outputs=body.outputs,
+            model=body.run_llm_model or None,
+        )
+        if result is None:
+            return _simple_code_fix_block_response(body, error="AI not configured")
+        log.info(
+            "blocks_generate_code_fix_ok",
+            block=body.block_name, language=body.language,
+        )
+        return result
+    except Exception as exc:
+        log.error("blocks_generate_code_fix_error", block=body.block_name, error=str(exc))
+        return _simple_code_fix_block_response(body, error=str(exc))
+
+
 # ── Scaffold-only blocks (no AI call, never need a key) ─────────────────────────
 #
 # Several block types produce their real content at *Run* time, not at creation:
@@ -2334,6 +2714,43 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         seed_from_desc="explanation",
         defaults={"language": "systemverilog", "logic_style": "auto",
                   "reset_style": "sync_active_high", "clocking": "single_clock"},
+    ),
+    # General-purpose code repair, in any language: a program in, a written fix
+    # order in, the corrected program out. The counterpart to the code block,
+    # which WRITES a program from a requirement and therefore cannot be used to
+    # mend one -- handed an existing program it regenerates from the description
+    # and discards the original.
+    #   code.code      -> code_fix.code   (or any block that emits source)
+    #   code_fix.code  -> whatever the original fed
+    #   verilator.fix_rtl / .fix_tb -> code_fix.fix
+    #
+    # "fix" is this block's MANDATORY INSTRUCTIONS channel -- the role `feedback`
+    # plays on code_hdl/testbench/spec_hdl. It is named `fix` rather than
+    # `feedback` because here the instruction is the whole job rather than an
+    # optional amendment, and because it makes the wire off verilator's repair
+    # orders read as what it is. There is deliberately no second `feedback` port:
+    # two instruction channels on a block whose entire task is following one
+    # instruction would be a second source of truth nothing reconciles.
+    #
+    # "code" is in BOTH lists. That is the documented exception rather than the
+    # `collect_coverage`/`coverage` trap the verilator entry warns about: the
+    # input is the program to repair and the output is that same program repaired,
+    # the same shape as spec_hdl's `explanation` and verilator's `rtl`
+    # pass-through. Port files live under separate inputs/ and outputs/
+    # directories, so nothing collides on disk.
+    #
+    # "code_change" is a unified diff COMPUTED BY THE SERVER from the two
+    # versions, never asked of the model: a hand-written diff is the one output a
+    # model cannot be trusted to get right, and a wrong diff is worse than none.
+    # The narrative belongs on `explanation`.
+    "code_fix": _ScaffoldSpec(
+        category_based=True,
+        inputs=("code", "fix", "language"),
+        outputs=("code", "code_change", "explanation", "improvements", "status",
+                 "errors"),
+        seed_map={"code": "code", "fix": "fix", "language": "language"},
+        seed_from_desc="fix",
+        defaults={},
     ),
 }
 

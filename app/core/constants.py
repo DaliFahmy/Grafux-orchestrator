@@ -66,6 +66,14 @@ class BlockType(str, Enum):
     # failing tests, but nothing could repair the contract they were both derived
     # from, which is the actual root cause whenever the two disagree.
     SPEC_HDL = "spec_hdl"
+    # General-purpose code REPAIR: source code in, a written fix instruction in,
+    # the corrected program out. Separate from CODE because that prompt writes a
+    # program from a requirement -- handed an existing program it regenerates and
+    # throws the original away, which is the opposite of a fix. Separate from
+    # CODE_HDL because this one is language-agnostic and freezes nothing: the HDL
+    # repair path has a module interface it must keep byte-identical and a
+    # validator that enforces it, neither of which has any meaning for Python.
+    CODE_FIX = "code_fix"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -80,14 +88,22 @@ BLOCK_TYPE_SECTION: dict[str, str] = {
     BlockType.TESTBENCH.value: "create_testbench",
     BlockType.CODE_HDL.value: "create_code_hdl",
     BlockType.SPEC_HDL.value: "create_spec_hdl",
+    BlockType.CODE_FIX.value: "create_code_fix",
 }
 
 # Msg_config section for REPAIRING an existing HDL design against failing tests.
 #
-# Deliberately NOT in BLOCK_TYPE_SECTION: it is a mode of the code block, chosen
-# per request by router.code_prompt_section(), not a block type. That map is
-# looked up as BLOCK_TYPE_SECTION.get(block_type, ...) on every AI block, and a
-# non-type key in it would eventually route a real block to the RTL fixer.
+# Deliberately NOT in BLOCK_TYPE_SECTION: it is a MODE of the code and code_hdl
+# blocks, chosen per request by router.code_prompt_section() /
+# router.code_hdl_prompt_section(), not a block type. That map is looked up as
+# BLOCK_TYPE_SECTION.get(block_type, ...) on every AI block, and a non-type key in
+# it would eventually route a real block to the RTL fixer.
+#
+# Not to be confused with BlockType.CODE_FIX, which IS a block type and maps to
+# [create_code_fix]. The two are different jobs that happen to share the word:
+# this mode repairs HDL and keeps the module interface byte-identical (enforced by
+# hdl.validate_rtl_fix); that type repairs a program in any language and freezes
+# nothing.
 CODE_FIX_RTL_SECTION = "fix_rtl"
 
 # Search-block types whose Run/Regenerate output is grounded in live web data.

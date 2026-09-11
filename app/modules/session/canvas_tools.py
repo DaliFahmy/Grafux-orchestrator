@@ -214,6 +214,13 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "(chip design; set 'top'/'pdk'/'clock_period').\n"
                 "- testbench: write a cocotb testbench that verifies a Verilog module "
                 "against its SPEC (chip verification; set 'top' and 'spec').\n"
+                "- code_fix: REPAIR an existing program. Use it whenever there is "
+                "already code and the user wants it changed -- fix, debug, correct, "
+                "patch, refactor, add a feature to. Set 'fix' to what must change, and "
+                "'source_code' only if the user pasted the program (otherwise wire "
+                "another block's code output into its 'code' input). NEVER use 'code' "
+                "for this: that one writes a fresh program from the description and "
+                "throws the existing one away.\n"
                 "- code_hdl: write a synthesizable RTL design (verilog, systemverilog "
                 "or vhdl) from a SPEC (chip design; set 'top', 'spec' and 'language'). "
                 "Prefer this over 'code' whenever the user wants hardware.\n"
@@ -295,6 +302,22 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "drops writes when it is full'). Unlike 'spec' this is the INPUT to be "
                 "made rigorous, not an already-rigorous contract. Falls back to the "
                 "description when omitted; ignored for other types."
+            ),
+            "fix": _str_prop(
+                "For a 'code_fix' block: the repair instruction -- what must change "
+                "about the program (e.g. 'it crashes on an empty file; return an empty "
+                "list instead' or 'retry failed requests three times with backoff'). "
+                "REQUIRED for that type: without it the block has nothing to do. It is "
+                "read as a mandatory instruction and checked against the result, so be "
+                "specific and keep the user's own wording. Falls back to the description "
+                "when omitted; ignored for other types."
+            ),
+            "source_code": _str_prop(
+                "For a 'code_fix' block: the program to repair, when the user actually "
+                "pasted it into the conversation. Omit it when they referred to code that "
+                "lives on another block -- wire that block's output into this one's 'code' "
+                "input instead, which is the normal case. Deliberately not called 'code': "
+                "that key already carries a tools block's Python. Ignored for other types."
             ),
             "pdk": _str_prop(
                 "For a 'yosys' or 'openroad' block: the process design kit / OpenROAD "
@@ -484,6 +507,10 @@ def function_call_to_action(
             # testbench / code_hdl seed: the spec the tests and the design share,
             # and the rough explanation the spec_hdl block makes rigorous.
             "spec", "explanation",
+            # code_fix seeds: the repair order, and the program when it was pasted
+            # rather than wired. "source_code" rather than "code" because "code"
+            # already means a tools block's Python in this pipeline (_PATCH_KEYS).
+            "fix", "source_code",
             # The two params that pick a SUBTYPE. Both are declared above, and
             # leaving them out here does not fail -- the enricher normalises a
             # missing value to the default, so every voice-created memory block

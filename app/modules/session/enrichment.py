@@ -576,6 +576,83 @@ async def _enrich_spec_hdl_block(action: dict[str, Any], session_id: str) -> Enr
     return status
 
 
+async def _enrich_code_fix_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
+    """Scaffold a code_fix block's ports and, with a program AND an order, repair it.
+
+    Mirrors :func:`_enrich_code_hdl_block`, with one difference that matters: this
+    block needs TWO things before it can do anything, and only one of them is likely
+    to be in a chat message. The repair order comes from the action's ``fix`` seed or
+    the description ("make it retry three times" IS the order in practice), but the
+    program itself is usually on another block the user is about to wire up rather
+    than pasted into the conversation. So the generation runs only when both are
+    present, and otherwise the block is scaffolded with whatever was given, ready to
+    wire and Run.
+
+    The program is read from ``source_code``, NOT ``code``: ``action["code"]`` already
+    means "the Python of a tools block" everywhere else in this pipeline -- it is in
+    ``_PATCH_KEYS`` and the client applies it only for tool blocks -- so reusing the
+    name here would have the seed silently ignored by the app and would put a second
+    meaning on a key that already has one.
+    """
+    from app.modules.blocks.router import generate_code_fix_payload, generate_scaffold_payload
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+    category = str(action.get("category", "")).strip() or "general"
+    description = str(action.get("description", "")).strip()
+    # Not stripped: a program's trailing newline is part of the file. The
+    # emptiness test below uses the stripped form instead. (The scaffold fallback
+    # does strip its seeds -- that is generate_scaffold_payload's shared rule for
+    # every type, and a seed is a starting value rather than the artifact.)
+    source = str(action.get("source_code", ""))
+    order = str(action.get("fix", "")).strip() or description
+    language = str(action.get("language", "")).strip()
+
+    result = None
+    status: EnrichStatus = ("ok", "")
+    if source.strip() and order:
+        try:
+            result = await generate_code_fix_payload(
+                block_name=name,
+                category=category,
+                description=description,
+                code=source,
+                fix=order,
+                language=language,
+                inputs=action.get("inputs") or [],
+                outputs=action.get("outputs") or [],
+            )
+        except ValueError as exc:
+            # One of the two halves turned out to be blank after all. Scaffold it
+            # rather than failing the whole create: the user can fill the port and Run.
+            log.warning("create_code_fix_rejected", session_id=session_id, block=name,
+                        error=str(exc))
+            status = ("failed", str(exc))
+    if result is None:
+        result = await generate_scaffold_payload(
+            block_type="code_fix",
+            block_name=name,
+            category=category,
+            description=description,
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+            seeds={"code": source, "fix": order, "language": language},
+        )
+        if source.strip() and order and status[0] == "ok":
+            status = ("failed", "AI not configured")
+    params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+    log.info(
+        "create_code_fix_ok", session_id=session_id, block=name, language=language,
+        generated=bool(source.strip() and order) and status[0] == "ok",
+    )
+    return status
+
+
 # block_type → enricher. ``tools``/``code`` generate real content (Python / source); the
 # search types are AI-generated (and grounded where applicable); everything else is a port
 # scaffold whose content arrives at Run. Types absent here fall through unenriched (the client
@@ -617,4 +694,7 @@ _ENRICHERS = {
     "code_hdl": _enrich_code_hdl_block,
     # ...and so is the contract BOTH of those are written from.
     "spec_hdl": _enrich_spec_hdl_block,
+    # Code repair in any language. Generates only when the chat supplied BOTH the
+    # program and the order; a program usually arrives by wire, not by message.
+    "code_fix": _enrich_code_fix_block,
 }

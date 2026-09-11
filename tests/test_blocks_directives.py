@@ -526,3 +526,94 @@ endmodule"""
     assert problems
     problems, _ = D.unmet(applied, found, kind=D.ARTIFACT_RTL, top="sync_fifo")
     assert problems == []
+
+
+# ── ARTIFACT_CODE: a program in an unknown language (the code_fix block) ──────
+
+
+def test_the_comment_style_is_resolved_per_language_and_admits_ignorance():
+    assert D.code_comment_style("Python") == D._CODE_COMMENT_HASH
+    assert D.code_comment_style("C++") == D._CODE_COMMENT_SLASH
+    assert D.code_comment_style("TypeScript") == D._CODE_COMMENT_SLASH
+    assert D.code_comment_style("sql") == D._CODE_COMMENT_DASH
+    # "" is a real answer: it means "cannot tell code from commentary".
+    assert D.code_comment_style("brainfuck") == ""
+    assert D.code_comment_style("") == ""
+
+
+def test_python_floor_division_is_not_mistaken_for_a_comment():
+    """The reason there is no language-agnostic stripper.
+
+    ``a // b`` is a division in Python and a comment in C; ``#define`` is a
+    directive in C and a comment in Python. A stripper that guessed would delete
+    real code and then report a rule unmet that the program actually satisfies.
+    """
+    assert "b" in D._strip_for("a = x // b", D.ARTIFACT_CODE, "python")
+    assert "eval" not in D._strip_for("int a; // eval", D.ARTIFACT_CODE, "c++")
+    assert "MAX" in D._strip_for("#define MAX 5", D.ARTIFACT_CODE, "c")
+    assert "MAX" not in D._strip_for("# define MAX 5", D.ARTIFACT_CODE, "python")
+    # An unrecognised language strips nothing rather than guessing.
+    assert D._strip_for("a // b # c -- d", D.ARTIFACT_CODE, "") == "a // b # c -- d"
+
+
+def test_a_prohibition_is_not_broken_by_its_own_mention_in_a_comment():
+    found = D.extract_directives("Do not use `eval`.", source="fix")
+    mentioned = '# this no longer calls eval\nrows = parse(raw)\n'
+    used = 'rows = eval(raw)\n'
+    assert D.unmet(mentioned, found, kind=D.ARTIFACT_CODE, language="python")[0] == []
+    assert D.unmet(used, found, kind=D.ARTIFACT_CODE, language="python")[0]
+
+
+def test_a_prohibition_is_dropped_when_the_language_is_unknown():
+    """Honesty rule. Without the comment boundary the check cannot be made.
+
+    A prohibition is the one check that FAILS on a mention, so an unstripped comment
+    would be a FALSE violation - and a forbidden directive is binding, so that costs
+    a repair round and can end the run in a failure the program did not earn. A
+    missed violation costs nothing, so ignorance resolves this way round.
+    """
+    found = D.extract_directives("Do not use `eval`.", source="fix")
+    used = "rows = eval(raw)\n"
+    assert D.unmet(used, found, kind=D.ARTIFACT_CODE, language="python")[0]
+    assert D.unmet(used, found, kind=D.ARTIFACT_CODE, language="")[0] == []
+
+
+def test_a_pinned_constant_is_checked_as_an_assignment_not_a_declaration():
+    """``parameter`` is an HDL keyword; the assignment is what survives translation."""
+    found = D.extract_directives("set MAX_ROWS to 500", source="fix")
+    assert [d.kind for d in found] == [D.KIND_PARAMETER]
+    for body in ("MAX_ROWS = 500", "const MAX_ROWS = 500;", "self.MAX_ROWS = 500"):
+        assert D.unmet(body, found, kind=D.ARTIFACT_CODE, language="python")[0] == [], body
+    assert D.unmet("MAX_ROWS := 500", found, kind=D.ARTIFACT_CODE, language="go")[0] == []
+    assert D.unmet("#define MAX_ROWS 500", found, kind=D.ARTIFACT_CODE, language="c")[0] == []
+    # ...and the near misses stay misses.
+    for body in ("MAX_ROWS = 300", "MAX_ROWS = 5000", "FOO_MAX_ROWS = 500",
+                 "print(MAX_ROWS)"):
+        assert D.unmet(body, found, kind=D.ARTIFACT_CODE, language="python")[0], body
+
+
+def test_hdl_and_cocotb_rules_are_never_checked_against_a_general_program():
+    """A Python program must not be rejected for not being Verilog or a testbench."""
+    assert D.KIND_SIGNAL in D._UNDECIDABLE_IN_CODE
+    assert D.KIND_TEST in D._UNDECIDABLE_IN_CODE
+    assert D.KIND_REQUIREMENT in D._UNDECIDABLE_IN_CODE
+    # ...but a pinned constant IS decidable, so it is deliberately absent.
+    assert D.KIND_PARAMETER not in D._UNDECIDABLE_IN_CODE
+
+    signal = D.Directive(
+        kind=D.KIND_SIGNAL, target="almost_full", value="", text="add an almost_full output",
+        source="fix", binding=True,
+    )
+    test = D.Directive(
+        kind=D.KIND_TEST, target="test_wrap", value="", text="add test_wrap",
+        source="fix", binding=True,
+    )
+    body = "def main():\n    return 0\n"
+    assert D.unmet(body, [signal, test], kind=D.ARTIFACT_CODE, language="python") == ([], [])
+
+
+def test_the_rtl_checks_are_unaffected_by_the_new_kind():
+    """The HDL paths must behave exactly as before; ARTIFACT_CODE is additive."""
+    found = D.extract_directives(FEEDBACK, source="feedback")
+    assert D.unmet(RTL_WITHOUT, found, kind=D.ARTIFACT_RTL, top="sync_fifo")[0]
+    assert D.unmet(RTL_WITH, found, kind=D.ARTIFACT_RTL, top="sync_fifo")[0] == []

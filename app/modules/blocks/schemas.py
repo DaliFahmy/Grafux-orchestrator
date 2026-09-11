@@ -77,6 +77,42 @@ class CodeHdlGenerateRequest(BaseModel):
     run_llm_model: str = ""
 
 
+class CodeFixGenerateRequest(BaseModel):
+    """Inputs for the code_fix block's AI generation (create, Run and Regenerate).
+
+    General-purpose code repair, in any language. ``code`` is the program to fix
+    and ``fix`` is the written repair order -- both are required, because a fix
+    with no program has nothing to edit and a program with no fix has nothing to
+    do. ``fix`` is this block's MANDATORY INSTRUCTIONS channel, the role
+    ``feedback`` plays on code_hdl/testbench/spec_hdl; it is named ``fix`` so the
+    obvious wire reads correctly (``verilator.fix_rtl -> code_fix.fix``), and the
+    block carries no second instruction port for the same reason no block carries
+    two of anything the server has to reconcile.
+
+    ``language`` is optional: left blank, the model is told to infer it from the
+    code it was handed, which is more reliable than making the user restate
+    something the program already says.
+
+    Unlike CodeHdlGenerateRequest there is no ``previous_code`` and no frozen
+    interface. The thing to repair arrives on ``code`` rather than being read back
+    off the block's own output, so there is no repair-mode gate to select -- this
+    block is always repairing.
+    """
+
+    block_name: str
+    category: str = "general"
+    description: str = ""
+    # The program to repair.
+    code: str = ""
+    # What is wrong with it / what to change. Read as mandatory instructions.
+    fix: str = ""
+    # Blank means "infer it from the code".
+    language: str = ""
+    inputs: list[str] = []
+    outputs: list[str] = []
+    run_llm_model: str = ""
+
+
 class SpecHdlGenerateRequest(BaseModel):
     """Inputs for the spec_hdl block's AI generation (create, Run and Regenerate).
 
