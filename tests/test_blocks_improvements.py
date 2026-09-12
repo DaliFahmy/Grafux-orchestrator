@@ -424,6 +424,34 @@ def test_openroad_and_devices_keep_the_single_improvements_port():
     assert "improvements" in blocks_router._SCAFFOLD_SPECS["devices"].outputs
 
 
+def test_openram_keeps_the_single_improvements_port_and_no_fix_ports():
+    """
+    A memory compiler has one thing to review -- the macro's configuration --
+    so its advice lands on one port. The three-way split exists because
+    verilator's advice is wired to three different blocks; here there is nothing
+    to split. And there are no fix_* ports at all: only a block that RUNS TESTS
+    can attribute a failure to one of several artifacts, so the repair-order
+    family would have nothing to attribute.
+    """
+    outputs = blocks_router._SCAFFOLD_SPECS["openram"].outputs
+    assert "improvements" in outputs
+    assert not any(o.startswith("improvements_") for o in outputs)
+    assert not any(o.startswith("fix_") for o in outputs)
+
+
+def test_openram_declares_the_evidence_its_review_is_built_from():
+    """
+    Mirrors EdaImprovements::evidencePortsFor("openram") in
+    Grafux-app/src/clients/grafux-devices/edaimprovements.h. The review reads
+    the RESOLVED config and the stats; a port missing here is a review built
+    with its evidence missing, and nothing says so.
+    """
+    outputs = set(blocks_router._SCAFFOLD_SPECS["openram"].outputs)
+    for needed in ("status", "top", "tech_name", "config", "stats",
+                   "errors", "warnings", "log"):
+        assert needed in outputs, needed
+
+
 def test_yosys_has_no_improvements_port():
     # Nothing reviews a synthesis run, so it must not pay for one.
     outputs = blocks_router._SCAFFOLD_SPECS["yosys"].outputs

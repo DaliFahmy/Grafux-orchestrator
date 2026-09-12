@@ -2636,6 +2636,47 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
                   "core_utilization": "45", "aspect_ratio": "1",
                   "from_stage": "synth", "to_stage": "final", "timeout": "7200"},
     ),
+    # The memory compiler. Generative rather than transformational: there is no
+    # design input at all, so the "source" is the parameter set and `config` is
+    # the escape hatch for a user who would rather write OpenRAM's own file.
+    #
+    # `config` is listed FIRST because a non-empty one overrides every parameter
+    # below it, and a port that silently invalidates a dozen others must not be
+    # buried among them. It is in both lists: in is the override you supplied
+    # (usually empty), out is the config OpenRAM ACTUALLY ran with every default
+    # it filled in -- the documented "echoed through" case, like verilator's
+    # `rtl` and code_fix's `code`, and the gesture that reproduces a run.
+    #
+    # `output_name` in, `top` out: the input is named after the OpenRAM config
+    # variable it maps to one-for-one, which is the whole premise of a
+    # parameter-driven block, and the output takes the canvas name every other
+    # block addresses a module by. Deliberately not "fixed" to match.
+    #
+    # `verilog_model` is deliberately NOT `rtl` and `spice` is NOT `netlist`:
+    # both of those names already mean something wirable on this canvas, and a
+    # behavioural model fed to yosys or a SPICE subcircuit fed to openroad fails
+    # deep inside a tool, pointing nowhere near the wire that caused it.
+    #
+    # No `pdk` port: an OpenRAM technology is not an ORFS platform, and a `pdk`
+    # port that accepted "sky130hd" and meant nothing to the compiler is a trap.
+    "openram": _ScaffoldSpec(
+        category_based=True,
+        inputs=("config", "word_size", "num_words", "num_banks", "num_rw_ports",
+                "num_r_ports", "num_w_ports", "write_size", "tech_name",
+                "output_name", "process_corners", "supply_voltages",
+                "temperatures", "check_lvsdrc", "netlist_only", "extra_config",
+                "files", "timeout", "instance_type", "image", "api_keys"),
+        outputs=("status", "top", "tech_name", "verilog_model", "spice", "gds",
+                 "lef", "lib", "datasheet", "config", "stats", "reports",
+                 "errors", "warnings", "log", "artifacts", "eda_id", "cost",
+                 "improvements"),
+        seed_map={"top": "output_name"},
+        defaults={"word_size": "8", "num_words": "64", "num_banks": "1",
+                  "num_rw_ports": "1", "num_r_ports": "0", "num_w_ports": "0",
+                  "tech_name": "scn4m_subm", "process_corners": "TT",
+                  "temperatures": "25", "check_lvsdrc": "0",
+                  "netlist_only": "0", "timeout": "3600"},
+    ),
     # Verification. The testbench block is AI-generated (like code) but is listed
     # here too so the create path always lays out the same ports whether or not
     # the model produced content:

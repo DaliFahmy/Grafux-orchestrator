@@ -74,6 +74,13 @@ class BlockType(str, Enum):
     # repair path has a module interface it must keep byte-identical and a
     # validator that enforces it, neither of which has any meaning for Python.
     CODE_FIX = "code_fix"
+    # The memory compiler: memory PARAMETERS in, a hardened SRAM macro out (GDS,
+    # LEF, Liberty, a behavioural model, a SPICE netlist). The first EDA type
+    # that is generative rather than transformational -- the other three take a
+    # design in and give a derived view out, while this one has no design input
+    # at all. It is not a stage of the pipeline above but a SOURCE of one of its
+    # inputs: the macro a design instantiates has to come from somewhere.
+    OPENRAM = "openram"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -140,6 +147,7 @@ EXPENSIVE_BLOCK_TYPES: frozenset[str] = frozenset({
     BlockType.VERILATOR.value,
     BlockType.YOSYS.value,
     BlockType.OPENROAD.value,
+    BlockType.OPENRAM.value,
     BlockType.GPU.value,
 })
 

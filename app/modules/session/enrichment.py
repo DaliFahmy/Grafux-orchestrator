@@ -687,6 +687,7 @@ _ENRICHERS = {
     "verilator": _enrich_scaffold_block,
     "yosys": _enrich_scaffold_block,
     "openroad": _enrich_scaffold_block,
+    "openram": _enrich_scaffold_block,
     # The testbench IS AI content (tests derived from the spec), so it generates at
     # create time like code, falling back to a port scaffold without a spec/key.
     "testbench": _enrich_testbench_block,

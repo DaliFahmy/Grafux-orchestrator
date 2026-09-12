@@ -245,6 +245,21 @@ _OPENROAD_OUTPUTS = {
     "metrics", "reports", "errors", "warnings", "log", "artifacts", "eda_id",
     "cost", "improvements",
 }
+_OPENRAM_INPUTS = {
+    # `config` is the whole-file override; the twelve parameters after it are
+    # OpenRAM's own config variables one-for-one, which is what lets the block
+    # face read like the compiler's documentation.
+    "block_description", "config", "word_size", "num_words", "num_banks",
+    "num_rw_ports", "num_r_ports", "num_w_ports", "write_size", "tech_name",
+    "output_name", "process_corners", "supply_voltages", "temperatures",
+    "check_lvsdrc", "netlist_only", "extra_config", "files", "timeout",
+    "instance_type", "image", "api_keys",
+}
+_OPENRAM_OUTPUTS = {
+    "status", "top", "tech_name", "verilog_model", "spice", "gds", "lef", "lib",
+    "datasheet", "config", "stats", "reports", "errors", "warnings", "log",
+    "artifacts", "eda_id", "cost", "improvements",
+}
 
 
 @pytest.mark.asyncio
@@ -332,6 +347,86 @@ async def test_scaffold_eda_defaults_do_not_leak_across_types():
         block_type="verilator", block_name="v")
     ins = _ports(ver["tool_calls"][0]["params"], "input")
     assert "pdk" not in ins and "clock_period" not in ins
+
+
+@pytest.mark.asyncio
+async def test_scaffold_openram_exact_ports_and_defaults():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="openram", block_name="data sram",
+        description="A 1 kbit SRAM for the datapath", seeds={"top": "data_sram"},
+    )
+    params = result["tool_calls"][0]["params"]
+    assert params["block_type"] == "openram"
+    assert params["name"] == "data_sram"
+    ins, outs = _ports(params, "input"), _ports(params, "output")
+    assert set(ins) == _OPENRAM_INPUTS
+    assert set(outs) == _OPENRAM_OUTPUTS
+    # The chat says "top"; this block calls the same thing output_name, because
+    # on the way IN the port is named after the OpenRAM config variable.
+    assert ins["output_name"]["port_content"] == "data_sram"
+    assert ins["word_size"]["port_content"] == "8"
+    assert ins["num_words"]["port_content"] == "64"
+    assert ins["tech_name"]["port_content"] == "scn4m_subm"
+    # DRC/LVS off by default: they need tools the image does not carry and can
+    # run longer than the compile itself.
+    assert ins["check_lvsdrc"]["port_content"] == "0"
+    assert outs["gds"]["port_path"] == "data/openram/general/data_sram/outputs/gds.txt"
+
+
+@pytest.mark.asyncio
+async def test_openram_config_is_echoed_through_and_that_is_deliberate():
+    """
+    In is the override you supplied; out is the config OpenRAM actually ran,
+    with every default it filled in. Safe because they are different files, and
+    it is the gesture that reproduces a run -- see the note in _SCAFFOLD_SPECS.
+    """
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="openram", block_name="m")
+    params = result["tool_calls"][0]["params"]
+    assert "config" in _ports(params, "input")
+    assert "config" in _ports(params, "output")
+
+
+@pytest.mark.asyncio
+async def test_openram_has_no_design_input_and_no_pdk():
+    """
+    It is generative, not transformational: the parameters ARE the request. A
+    `pdk` port would be a trap -- an OpenRAM technology is not an ORFS platform,
+    so a port that accepted "sky130hd" would mean nothing to the compiler.
+    """
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="openram", block_name="m")
+    ins = _ports(result["tool_calls"][0]["params"], "input")
+    for absent in ("rtl", "netlist", "spec", "pdk"):
+        assert absent not in ins, absent
+
+
+@pytest.mark.asyncio
+async def test_openram_model_and_netlist_are_not_named_rtl_or_netlist():
+    """
+    Both of those names already mean something WIRABLE on this canvas. A
+    behavioural model fed to yosys, or a SPICE subcircuit fed to openroad, fails
+    deep inside a tool pointing nowhere near the wire that caused it.
+    """
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="openram", block_name="m")
+    outs = _ports(result["tool_calls"][0]["params"], "output")
+    assert "verilog_model" in outs and "rtl" not in outs
+    assert "spice" in outs and "netlist" not in outs
+
+
+@pytest.mark.asyncio
+async def test_openram_model_can_be_wired_into_a_verilator_block():
+    """The one wire that puts a generated macro into the existing pipeline."""
+    ram = await blocks_router.generate_scaffold_payload(
+        block_type="openram", block_name="m")
+    ver = await blocks_router.generate_scaffold_payload(
+        block_type="verilator", block_name="v")
+    ram_out = _ports(ram["tool_calls"][0]["params"], "output")
+    ver_in = _ports(ver["tool_calls"][0]["params"], "input")
+    assert "verilog_model" in ram_out
+    assert "rtl" in ver_in
+    assert "top" in ram_out and "top" in ver_in
 
 
 @pytest.mark.asyncio
