@@ -689,6 +689,9 @@ _ENRICHERS = {
     "openroad": _enrich_scaffold_block,
     "openram": _enrich_scaffold_block,
     "opengcram": _enrich_scaffold_block,
+    # The netlist is written at RUN time (the app asks /generate/analogue_netlist
+    # when the port is empty), so create lays out ports and defaults only.
+    "analogue_simulator": _enrich_scaffold_block,
     # The testbench IS AI content (tests derived from the spec), so it generates at
     # create time like code, falling back to a port scaffold without a spec/key.
     "testbench": _enrich_testbench_block,

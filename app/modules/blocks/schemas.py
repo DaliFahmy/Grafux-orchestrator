@@ -330,3 +330,36 @@ class RegenerateFilterRequest(BaseModel):
     filter_type: str = "text"
     prompt: str
     regen_llm_model: str | None = None
+
+
+class AnalogueNetlistGenerateRequest(BaseModel):
+    """Inputs for writing (or revising) an analogue_simulator block's SPICE netlist.
+
+    The analogue_simulator block runs ngspice on its ``netlist`` port.  When that
+    port is empty the app asks for one here, from ``description`` (the block's
+    ``block_description``), before it rents a pod -- so a netlist that would not
+    load is caught by the validator, not by a billed simulation.
+
+    ``pdk`` decides the device vocabulary (sky130A subcircuits vs gf180mcuD
+    models), and the corner/temperature/supply are passed so the model sizes and
+    biases for them; the server adds the model library itself.  ``analyses``,
+    ``meas_statements`` and ``probes`` are what the user already put on those
+    ports: the model keeps them when set and proposes them when empty.
+
+    ``feedback`` plus ``previous_netlist`` make it a REVISION: the existing deck
+    is a baseline to change only where asked, not a draft to rewrite.
+    """
+
+    block_name: str
+    category: str = "general"
+    description: str = ""
+    pdk: str = "sky130A"
+    corner: str = ""
+    temperature: str = ""
+    supply_voltage: str = ""
+    analyses: str = ""
+    meas_statements: str = ""
+    probes: str = ""
+    feedback: str = ""
+    previous_netlist: str = ""
+    run_llm_model: str | None = None

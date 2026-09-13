@@ -49,6 +49,7 @@ from app.modules.blocks.hdl import (
     validate_testbench,
 )
 from app.modules.blocks.schemas import (
+    AnalogueNetlistGenerateRequest,
     CodeFixGenerateRequest,
     CodeGenerateRequest,
     CodeHdlGenerateRequest,
@@ -67,6 +68,7 @@ from app.modules.blocks.schemas import (
     TestbenchGenerateRequest,
     TopicGenerateRequest,
 )
+from app.modules.blocks.spice import extract_spice, normalize_pdk, validate_netlist
 from app.prompts import get_json_schema, get_system_prompt
 
 log = get_logger("blocks.router")
@@ -2067,6 +2069,148 @@ async def generate_code_hdl_block(
         return _simple_code_hdl_response(body, error=str(exc))
 
 
+# ── analogue_simulator netlist (AI SPICE deck, validated before a pod is rented) ─
+#
+# The analogue_simulator block itself is a scaffold-only EDA block: ngspice runs
+# on the devices server's pod. This is the one AI step it has -- writing the deck
+# when the user described a circuit instead of wiring one -- and it runs in the
+# APP'S run path, before provisioning, so a deck that would not load costs a
+# repair round here rather than a billed pod start.
+#
+# The answer is a flat JSON object, not a block envelope: the caller is a Run
+# button filling one port set on an existing block, not a create path.
+
+_ANALOGUE_NETLIST_SECTION = "create_analogue_netlist"
+_ANALOGUE_REPAIR_ROUNDS = 2
+
+
+def build_analogue_netlist_message(
+    body: AnalogueNetlistGenerateRequest, *, pdk: str, problems: list[str] | None = None,
+    draft: str = "",
+) -> str:
+    """Assemble the user message [create_analogue_netlist] expects."""
+    parts = [
+        f"Block name: {body.block_name}",
+        f"PDK: {pdk}",
+        f"Corner: {body.corner.strip() or 'typical'}",
+        f"Temperature (C): {body.temperature.strip() or '27'}",
+        f"Supply voltage: {body.supply_voltage.strip() or 'choose the nominal for the PDK'}",
+        f"Circuit description:\n{(body.description or '').strip()}",
+    ]
+    for label, value in (("Analyses already on the block (keep them)", body.analyses),
+                         ("Measurements already on the block (keep them)", body.meas_statements),
+                         ("Probes already on the block (keep them)", body.probes)):
+        if (value or "").strip():
+            parts.append(f"{label}:\n{value.strip()}")
+    if (body.previous_netlist or "").strip():
+        parts.append(
+            "Current netlist (this block's existing deck; revise it, changing only what "
+            "the requested changes and the description require):\n"
+            f"{body.previous_netlist.strip()}")
+    if (body.feedback or "").strip():
+        parts.append(f"Requested changes:\n{body.feedback.strip()}")
+    if problems:
+        parts.append(
+            "Your previous netlist was REJECTED for these reasons; return a corrected one:\n- "
+            + "\n- ".join(problems)
+            + ("\n\nRejected netlist:\n" + draft.strip() if draft.strip() else ""))
+    return "\n\n".join(parts)
+
+
+async def generate_analogue_netlist_payload(body: AnalogueNetlistGenerateRequest) -> dict | None:
+    """Write (or revise) an analogue_simulator netlist, validated by :mod:`spice`.
+
+    Returns ``None`` when no LLM key is configured. Residual problems after the
+    last repair round are returned on ``improvements`` with
+    ``status=needs_review`` and the netlist IS still returned -- the simulator's
+    own log is a better judge than a rejected draft thrown away.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        return None
+    if not (body.description or "").strip() and not (body.previous_netlist or "").strip():
+        raise ValueError("a block_description is required to generate a netlist")
+    system_prompt = get_system_prompt(_ANALOGUE_NETLIST_SECTION)
+    if not system_prompt:
+        raise ValueError(f"{_ANALOGUE_NETLIST_SECTION} prompt section missing from Msg_config")
+
+    pdk = normalize_pdk(body.pdk)
+    problems: list[str] = []
+    result: dict = {}
+    netlist = ""
+    analyses = meas = probes = ""
+    for attempt in range(_ANALOGUE_REPAIR_ROUNDS + 1):
+        result = await _call_openai_json(
+            system_prompt,
+            build_analogue_netlist_message(body, pdk=pdk, problems=problems or None,
+                                           draft=netlist),
+            temperature=0.2, model=body.run_llm_model or None, max_tokens=6144,
+        )
+        netlist = extract_spice(str(result.get("netlist", "")))
+        # What the user already set wins over what the model proposed: the ports
+        # are theirs, and the prompt was told to keep them.
+        analyses = (body.analyses or "").strip() or str(result.get("analyses", "")).strip()
+        meas = (body.meas_statements or "").strip() or str(result.get("meas_statements", "")).strip()
+        probes = (body.probes or "").strip() or str(result.get("probes", "")).strip()
+        problems = validate_netlist(netlist, pdk, analyses=analyses,
+                                    supply_voltage=body.supply_voltage)
+        if not problems:
+            break
+        log.warning("analogue_netlist_validation_failed", block=body.block_name,
+                    attempt=attempt, problems=problems)
+
+    if not netlist.strip() and (body.previous_netlist or "").strip():
+        netlist = body.previous_netlist
+    improvements = str(result.get("improvements", "")).strip()
+    if problems:
+        improvements = ("Validation: " + "; ".join(problems)
+                        + ("\n" + improvements if improvements else ""))
+    return {
+        "netlist": netlist,
+        "analyses": analyses,
+        "meas_statements": meas,
+        "probes": probes,
+        "explanation": str(result.get("explanation", "")).strip(),
+        "improvements": improvements,
+        "status": "needs_review" if problems else "ok",
+        "errors": "",
+    }
+
+
+def _simple_analogue_netlist_response(body: AnalogueNetlistGenerateRequest,
+                                      error: str) -> dict:
+    """No netlist could be written. Never invents one; keeps a previous deck."""
+    return {
+        "netlist": (body.previous_netlist or "").strip(),
+        "analyses": body.analyses, "meas_statements": body.meas_statements,
+        "probes": body.probes, "explanation": "", "improvements": "",
+        "status": "error", "errors": error,
+    }
+
+
+@router.post("/generate/analogue_netlist")
+async def generate_analogue_netlist(
+    body: AnalogueNetlistGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Write the SPICE deck an analogue_simulator block will simulate, with fallback."""
+    try:
+        result = await generate_analogue_netlist_payload(body)
+        if result is None:
+            log.info("blocks_generate_analogue_netlist_fallback", reason="no_llm_key",
+                     block=body.block_name)
+            return _simple_analogue_netlist_response(
+                body, "AI not configured, so no netlist could be written. Wire a SPICE "
+                      "netlist into the netlist port instead.")
+        log.info("blocks_generate_analogue_netlist_ok", block=body.block_name,
+                 pdk=body.pdk, status=result["status"])
+        return result
+    except Exception as exc:
+        log.error("blocks_generate_analogue_netlist_error", block=body.block_name,
+                  error=str(exc))
+        return _simple_analogue_netlist_response(body, str(exc))
+
+
 # ── code_fix block (AI code repair, any language) ────────────────────────────
 #
 # The counterpart to the code block. That one WRITES a program from a requirement,
@@ -2709,6 +2853,36 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
                   "gc_type": "OS", "vddio": "1.2", "process_corners": "TT",
                   "supply_voltages": "1.0", "temperatures": "25",
                   "check_lvsdrc": "0", "netlist_only": "0", "timeout": "3600"},
+    ),
+    # The ANALOGUE simulator: ngspice on a transistor-level SPICE deck, the first
+    # EDA kind below the gate level. Mirrors EdaPorts::kAnalogueSim* in the app.
+    #   * `netlist` is in BOTH lists -- in is the deck you gave (or empty, in which
+    #     case the app generates one from block_description before renting a pod),
+    #     out is the EXACT deck ngspice ran, with the PDK .lib line, .temp and the
+    #     .control block the server added. The documented "echoed through" case.
+    #   * `meas_statements` in vs `measurements` out, and `analyses` in (requested)
+    #     vs `analyses` out (what ran, with point counts): on an EDA block a shared
+    #     name means "echoed through", so the measure lines and their VALUES must
+    #     not share one.
+    #   * `waveforms` is CSV in the shape the plotter parses (scale column first,
+    #     at most 8 series), so analogue_simulator.waveforms -> plotter.data wires
+    #     with no adapter. `raw` names the full rawfile artifact.
+    #   * `pdk` here IS a PDK (sky130A / gf180mcuD / none) -- the device models
+    #     the deck is simulated with -- not an ORFS platform.
+    "analogue_simulator": _ScaffoldSpec(
+        category_based=True,
+        inputs=("netlist", "pdk", "corner", "temperature", "supply_voltage",
+                "analyses", "meas_statements", "probes", "max_points",
+                "extra_control", "files", "timeout", "instance_type", "image",
+                "api_keys"),
+        outputs=("status", "netlist", "measurements", "waveforms",
+                 "operating_point", "analyses", "stats", "errors", "warnings",
+                 "log", "raw", "artifacts", "eda_id", "cost", "improvements"),
+        # A chat that names the process ("simulate it in gf180") seeds `pdk`;
+        # the ORFS-style "sky130hd" a user might say is normalised at Run.
+        seed_map={"pdk": "pdk"},
+        defaults={"pdk": "sky130A", "corner": "tt", "temperature": "27",
+                  "supply_voltage": "1.8", "max_points": "2000", "timeout": "900"},
     ),
     # Verification. The testbench block is AI-generated (like code) but is listed
     # here too so the create path always lays out the same ports whether or not

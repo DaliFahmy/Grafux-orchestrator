@@ -86,6 +86,10 @@ class BlockType(str, Enum):
     # Needs a technology that carries a gain cell on its tech_archive port --
     # none is public -- so the block refuses early, in words, without one.
     OPENGCRAM = "opengcram"
+    # The ANALOGUE simulator: ngspice on a transistor-level SPICE netlist with the
+    # sky130A / gf180mcuD device models. Below the gate level, where everything
+    # above stops: measurements, waveforms and an operating point, not pass/fail.
+    ANALOGUE_SIMULATOR = "analogue_simulator"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -154,6 +158,7 @@ EXPENSIVE_BLOCK_TYPES: frozenset[str] = frozenset({
     BlockType.OPENROAD.value,
     BlockType.OPENRAM.value,
     BlockType.OPENGCRAM.value,
+    BlockType.ANALOGUE_SIMULATOR.value,
     BlockType.GPU.value,
 })
 
