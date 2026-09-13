@@ -81,6 +81,11 @@ class BlockType(str, Enum):
     # at all. It is not a stage of the pipeline above but a SOURCE of one of its
     # inputs: the macro a design instantiates has to come from somewhere.
     OPENRAM = "openram"
+    # The GAIN-CELL memory compiler (OpenGCRAM, a fork of OpenRAM): the same
+    # generative shape as OPENRAM, for a 2T gain-cell array instead of 6T SRAM.
+    # Needs a technology that carries a gain cell on its tech_archive port --
+    # none is public -- so the block refuses early, in words, without one.
+    OPENGCRAM = "opengcram"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -148,6 +153,7 @@ EXPENSIVE_BLOCK_TYPES: frozenset[str] = frozenset({
     BlockType.YOSYS.value,
     BlockType.OPENROAD.value,
     BlockType.OPENRAM.value,
+    BlockType.OPENGCRAM.value,
     BlockType.GPU.value,
 })
 

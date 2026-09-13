@@ -2677,6 +2677,39 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
                   "temperatures": "25", "check_lvsdrc": "0",
                   "netlist_only": "0", "timeout": "3600"},
     ),
+    # The GAIN-CELL memory compiler, OpenGCRAM. A fork of OpenRAM, so every
+    # openram decision above holds and the output list is identical -- a
+    # generated gain-cell macro wires into the chain exactly where an SRAM does.
+    # The inputs add three:
+    #   * `tech_archive` second, right after `config`: no public technology
+    #     carries a gain cell, so without it nothing builds and it must not be
+    #     buried. The block uploads the file it names and the runtime unpacks it
+    #     onto OPENRAM_TECH.
+    #   * `gc_type` (OS / Si / hybrid) picks the cell, and `vddio` feeds the level
+    #     shifters a gain-cell array needs.
+    # Defaults differ on purpose: one read + one write port (the only cell
+    # upstream ships is 2-port; openram's 1 rw adds up to one port and fails),
+    # tech_name EMPTY so the archive's own directory name is used, and a 1.0 V
+    # supply, upstream's reference.
+    "opengcram": _ScaffoldSpec(
+        category_based=True,
+        inputs=("config", "tech_archive", "word_size", "num_words", "num_banks",
+                "num_rw_ports", "num_r_ports", "num_w_ports", "write_size",
+                "gc_type", "tech_name", "vddio", "output_name", "process_corners",
+                "supply_voltages", "temperatures", "check_lvsdrc", "netlist_only",
+                "extra_config", "files", "timeout", "instance_type", "image",
+                "api_keys"),
+        outputs=("status", "top", "tech_name", "verilog_model", "spice", "gds",
+                 "lef", "lib", "datasheet", "config", "stats", "reports",
+                 "errors", "warnings", "log", "artifacts", "eda_id", "cost",
+                 "improvements"),
+        seed_map={"top": "output_name"},
+        defaults={"word_size": "8", "num_words": "32", "num_banks": "1",
+                  "num_rw_ports": "0", "num_r_ports": "1", "num_w_ports": "1",
+                  "gc_type": "OS", "vddio": "1.2", "process_corners": "TT",
+                  "supply_voltages": "1.0", "temperatures": "25",
+                  "check_lvsdrc": "0", "netlist_only": "0", "timeout": "3600"},
+    ),
     # Verification. The testbench block is AI-generated (like code) but is listed
     # here too so the create path always lays out the same ports whether or not
     # the model produced content:

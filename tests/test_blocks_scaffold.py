@@ -260,6 +260,9 @@ _OPENRAM_OUTPUTS = {
     "datasheet", "config", "stats", "reports", "errors", "warnings", "log",
     "artifacts", "eda_id", "cost", "improvements",
 }
+# Mirrors EdaPorts::kOpenGcRamInputs / kOpenGcRamOutputs in the Qt app.
+_OPENGCRAM_INPUTS = _OPENRAM_INPUTS | {"tech_archive", "gc_type", "vddio"}
+_OPENGCRAM_OUTPUTS = set(_OPENRAM_OUTPUTS)
 
 
 @pytest.mark.asyncio
@@ -427,6 +430,38 @@ async def test_openram_model_can_be_wired_into_a_verilator_block():
     assert "verilog_model" in ram_out
     assert "rtl" in ver_in
     assert "top" in ram_out and "top" in ver_in
+
+
+@pytest.mark.asyncio
+async def test_scaffold_opengcram_exact_ports_and_defaults():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="opengcram", block_name="kv gcram",
+        description="An OS gain-cell cache", seeds={"top": "kv_gcram"},
+    )
+    params = result["tool_calls"][0]["params"]
+    assert params["block_type"] == "opengcram"
+    ins, outs = _ports(params, "input"), _ports(params, "output")
+    assert set(ins) == _OPENGCRAM_INPUTS
+    assert set(outs) == _OPENGCRAM_OUTPUTS
+    assert ins["output_name"]["port_content"] == "kv_gcram"
+    assert ins["gc_type"]["port_content"] == "OS"
+    # The only cell upstream ships is 2-port: one read + one write. openram's
+    # 1 rw default would add up to one port and fail inside the compiler.
+    assert ins["num_rw_ports"]["port_content"] == "0"
+    assert ins["num_r_ports"]["port_content"] == "1"
+    assert ins["num_w_ports"]["port_content"] == "1"
+    # Empty on purpose: the archive's own directory name is the technology.
+    assert ins["tech_name"]["port_content"] == ""
+    assert ins["tech_archive"]["port_content"] == ""
+    assert outs["gds"]["port_path"] == "data/opengcram/general/kv_gcram/outputs/gds.txt"
+
+
+@pytest.mark.asyncio
+async def test_opengcram_outputs_match_openram_so_the_wiring_is_the_same():
+    gc = await blocks_router.generate_scaffold_payload(block_type="opengcram", block_name="g")
+    ram = await blocks_router.generate_scaffold_payload(block_type="openram", block_name="r")
+    assert list(_ports(gc["tool_calls"][0]["params"], "output")) == \
+        list(_ports(ram["tool_calls"][0]["params"], "output"))
 
 
 @pytest.mark.asyncio

@@ -452,6 +452,20 @@ def test_openram_declares_the_evidence_its_review_is_built_from():
         assert needed in outputs, needed
 
 
+def test_opengcram_reviews_like_openram():
+    """
+    Mirrors EdaImprovements::evidencePortsFor("opengcram"): the same single
+    improvements port, no fix_* family, and the same evidence.
+    """
+    outputs = blocks_router._SCAFFOLD_SPECS["opengcram"].outputs
+    assert "improvements" in outputs
+    assert not any(o.startswith("improvements_") for o in outputs)
+    assert not any(o.startswith("fix_") for o in outputs)
+    for needed in ("status", "top", "tech_name", "config", "stats",
+                   "errors", "warnings", "log"):
+        assert needed in outputs, needed
+
+
 def test_yosys_has_no_improvements_port():
     # Nothing reviews a synthesis run, so it must not pay for one.
     outputs = blocks_router._SCAFFOLD_SPECS["yosys"].outputs
