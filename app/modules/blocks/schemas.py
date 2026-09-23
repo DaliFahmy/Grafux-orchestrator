@@ -194,6 +194,41 @@ class TestbenchGenerateRequest(BaseModel):
     run_llm_model: str = ""
 
 
+class PostSiliconVerificationGenerateRequest(BaseModel):
+    """Inputs for the post_silicon_verification block's AI generation.
+
+    The post-silicon counterpart to the testbench block: where that one writes
+    tests for a design that does not exist yet, this one writes a program to run
+    on a chip that already does. ``explanation`` is what the user wants verified,
+    in prose; ``language`` picks how the case is written (c / cpp / python) and is
+    echoed to the cpu block that runs it.
+
+    ``constraints`` carries what the explanation does not — no libc, a wall-clock
+    budget, a fixed buffer size — and ``coverage_goals`` names the behaviours the
+    case must exercise, the same role it plays on the testbench block.
+
+    ``feedback`` is a review of a previous case, normally the cpu block's
+    ``analysis`` output, and ``previous_case`` is the code those notes are about.
+    Both together select the revision flow: feedback with no case has nothing to
+    repair, and a case with no feedback has nothing to repair it against.
+    """
+
+    block_name: str
+    category: str = "general"
+    description: str = ""
+    explanation: str = ""
+    language: str = "c"
+    constraints: str = ""
+    coverage_goals: str = ""
+    # The case the feedback is a review OF, normally this block's own ``code``
+    # output. Sent alongside feedback, not on an ordinary run.
+    previous_case: str = ""
+    feedback: str = ""
+    inputs: list[str] = []
+    outputs: list[str] = []
+    run_llm_model: str = ""
+
+
 class ImageGenerateRequest(BaseModel):
     block_name: str
     category: str = "general"

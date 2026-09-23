@@ -5,6 +5,7 @@ import datetime
 import difflib
 import hashlib
 import json
+import re
 import time
 import uuid
 from typing import NamedTuple
@@ -57,6 +58,7 @@ from app.modules.blocks.schemas import (
     ImageGenerateRequest,
     ImprovementsRequest,
     MergeInputItem,
+    PostSiliconVerificationGenerateRequest,
     RegenerateFilterRequest,
     RegenerateToolRequest,
     RunAccumulateRequest,
@@ -460,6 +462,13 @@ _LANG_ALIASES = {
     "python": "python",
     "c++": "cpp",
     "cpp": "cpp",
+    # Plain C is its own language here, not a spelling of C++: the cpu block picks
+    # gcc or g++ off this value, and a C case built as C++ can fail on things that
+    # are legal C (implicit conversions from void*, for one).
+    "c": "c",
+    "c99": "c",
+    "c11": "c",
+    "c17": "c",
     "c#": "csharp",
     "csharp": "csharp",
     "cs": "csharp",
@@ -2588,6 +2597,342 @@ async def generate_code_fix_block(
         return _simple_code_fix_block_response(body, error=str(exc))
 
 
+# ── post_silicon_verification block (a case to run on real silicon) ────────────
+
+# The languages a verification case can be written in.
+#
+# Assembly is deliberately absent. It is not portable, so supporting it honestly
+# means cross toolchains and a user-mode emulator on the cpu block's pod — and an
+# emulated duration is translation time, not a silicon measurement, which is
+# precisely the number this pair exists not to lie about.
+_PSV_LANGS = frozenset({"c", "cpp", "python"})
+
+# One repair round. A second failure means the EXPLANATION is the problem, and
+# the user is better served seeing that on the improvements port than paying for
+# another round of it — the same reasoning code_hdl and spec_hdl take.
+_PSV_REPAIR_ROUNDS = 1
+
+
+def build_post_silicon_verification_message(
+    *,
+    block_name: str,
+    explanation: str,
+    language: str,
+    constraints: str = "",
+    coverage_goals: str = "",
+    feedback: str = "",
+    previous_case: str = "",
+    directives: list[Directive] | None = None,
+    problems: list[str] | None = None,
+) -> str:
+    """Assemble the user message for [create_post_silicon_verification]."""
+    parts = [
+        f"Block name: {block_name}",
+        f"Language: {language}",
+        f"What to verify on the silicon:\n{explanation}",
+    ]
+    if constraints.strip():
+        parts.append(f"Constraints the case must respect:\n{constraints.strip()}")
+    if coverage_goals.strip():
+        parts.append(f"Behaviours the case must exercise:\n{coverage_goals.strip()}")
+    if previous_case.strip():
+        parts.append(
+            "The case you are revising — keep everything the feedback does not "
+            f"ask you to change:\n{previous_case.strip()}"
+        )
+    if feedback.strip():
+        parts.append(
+            "Review of that case; address it specifically:\n" + feedback.strip()
+        )
+    instructions = render_instructions(directives or [])
+    if instructions:
+        parts.append(instructions)
+    if problems:
+        parts.append(
+            "The previous draft was REJECTED for these reasons; return a corrected "
+            "case:\n- " + "\n- ".join(problems)
+        )
+    return "\n\n".join(parts)
+
+
+def _validate_verification_case(code: str, language: str) -> list[str]:
+    """
+    Cheap structural checks on a generated case.
+
+    Deliberately shallow: this cannot know whether the case tests the right
+    thing, only whether it is the kind of artifact the cpu block can run at all.
+    Anything it does flag would otherwise cost a pod, a compile and a wait before
+    surfacing as a build error with no explanation attached.
+    """
+    problems: list[str] = []
+    body = (code or "").strip()
+    if not body:
+        return ["the case is empty"]
+    if language in ("c", "cpp"):
+        if "main(" not in body:
+            problems.append(
+                "a C/C++ case must define main(); the cpu block compiles it to a "
+                "standalone binary and runs it"
+            )
+        if language == "c" and ("std::" in body or "#include <iostream>" in body):
+            problems.append(
+                "the case uses C++ constructs but the language is c; either write "
+                "plain C or set the language to cpp"
+            )
+    # Every language: the case has to say what it found. The cpu block's verdict
+    # is the exit code AND the PASS/FAIL lines it prints, so a case that reports
+    # nothing can only ever be judged by whether it crashed.
+    if not re.search(r"\b(PASS|FAIL)\b", body):
+        problems.append(
+            "the case never prints a PASS or FAIL line, so a run can only be "
+            "judged by its exit code; print 'PASS: <check>' or 'FAIL: <check>' "
+            "for each thing it verifies"
+        )
+    return problems
+
+
+async def generate_post_silicon_verification_payload(
+    *,
+    block_name: str,
+    category: str = "general",
+    description: str = "",
+    explanation: str = "",
+    language: str = "c",
+    constraints: str = "",
+    coverage_goals: str = "",
+    previous_case: str = "",
+    feedback: str = "",
+    inputs: list[str] | None = None,
+    outputs: list[str] | None = None,
+    model: str | None = None,
+) -> dict | None:
+    """Generate a post_silicon_verification block envelope via AI.
+
+    Flow: resolve the language → ask [create_post_silicon_verification] for a
+    runnable case plus what it proves → validate structurally → repair round on
+    failure → surface residual problems on ``improvements`` and mark ``status``.
+
+    **Instruction compliance.** ``feedback``, ``constraints`` and
+    ``coverage_goals`` are mined for checkable directives, shown to the model as
+    MANDATORY INSTRUCTIONS, and checked against the case it returns.
+
+    ``previous_case`` is the text a review is a review OF; without it the
+    prompt's "change what the feedback says and keep the rest" has nothing to
+    keep, and a reviewed run rewrites the whole case — losing the checks nobody
+    complained about. The same trap testbench documents.
+
+    Returns ``None`` when no LLM key is configured so callers fall back to a
+    scaffold.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        return None
+
+    name = block_name.replace(" ", "_")
+    cat = category or "general"
+    what = (explanation or "").strip() or (description or "").strip()
+    if not what:
+        raise ValueError(
+            "an explanation (or description) is required to generate a "
+            "verification case"
+        )
+
+    lang = _normalize_lang(language) or "c"
+    if lang not in _PSV_LANGS:
+        # Raised, not silently corrected: the enricher catches this and falls back
+        # to a scaffold, which leaves the user a working block plus their own
+        # language on the port — better than a case quietly written in another one.
+        raise ValueError(
+            f"'{language}' is not a language the cpu block can run; "
+            f"post_silicon_verification accepts {', '.join(sorted(_PSV_LANGS))}"
+        )
+
+    system_prompt = get_system_prompt(_BLOCK_TYPE_SECTION["post_silicon_verification"])
+    if not system_prompt:
+        raise ValueError(
+            "create_post_silicon_verification prompt section missing from Msg_config"
+        )
+
+    all_directives = collect_directives({
+        "feedback": feedback,
+        "constraints": constraints,
+        "coverage_goals": coverage_goals,
+    })
+    baseline = (previous_case or "").strip()
+
+    problems: list[str] = []
+    warnings: list[str] = []
+    result: dict = {}
+    code = ""
+    draft = previous_case
+    for attempt in range(_PSV_REPAIR_ROUNDS + 1):
+        user_message = build_post_silicon_verification_message(
+            block_name=name, explanation=what, language=lang,
+            constraints=constraints, coverage_goals=coverage_goals,
+            feedback=feedback, previous_case=draft,
+            directives=all_directives, problems=problems or None,
+        )
+        result = await _call_openai_json(
+            system_prompt, user_message, temperature=0.2, model=model, max_tokens=8192,
+        )
+        code = _strip_code_fences(str(result.get("code", "")))
+        problems = _validate_verification_case(code, lang)
+        if baseline and feedback.strip() and code.strip() == baseline:
+            problems.append(
+                "the returned case is identical to the one the feedback asked "
+                "you to change"
+            )
+        unmet_problems, unmet_warnings = unmet(
+            code, all_directives, kind=ARTIFACT_CODE,
+        )
+        unmet_problems.extend(
+            compliance_gaps(str(result.get("compliance", "")), all_directives)
+        )
+        problems = [*problems, *unmet_problems]
+        warnings = list(unmet_warnings)
+        if not problems:
+            break
+        log.warning(
+            "post_silicon_validation_failed",
+            block=name, attempt=attempt, problems=problems,
+        )
+        draft = code
+
+    # A repair round that came back empty must never blank the block: the draft
+    # before it is worth more than nothing, which is the guard code_hdl carries.
+    if not code.strip() and baseline:
+        code = baseline
+
+    missed, missed_warnings = unmet(code, all_directives, kind=ARTIFACT_CODE)
+    missed.extend(compliance_gaps(str(result.get("compliance", "")), all_directives))
+    notes = [n for n in problems if n not in missed]
+    notes.extend(w for w in warnings if w not in missed_warnings)
+
+    improvements = str(result.get("improvements", "")).strip()
+    unmet_section = render_unmet(missed, missed_warnings)
+    if unmet_section:
+        improvements = unmet_section + ("\n" + improvements if improvements else "")
+    if notes:
+        improvements = (
+            "Validation: " + "; ".join(notes)
+            + ("\n" + improvements if improvements else "")
+        )
+    status = "needs_review" if notes or missed or missed_warnings else "ok"
+
+    return _generated_envelope(
+        block_type="post_silicon_verification",
+        name=name,
+        category=cat,
+        description=description or what,
+        inputs={
+            "explanation": what,
+            "language": lang,
+            "constraints": constraints,
+            "coverage_goals": coverage_goals,
+            "previous_case": previous_case,
+            "feedback": feedback,
+        },
+        outputs={
+            "code": code,
+            # The REQUESTED language, never the model's echo of it: the cpu block
+            # wires off this port and compiles what it says, so a hallucinated
+            # value here becomes a build failure two blocks away. Same discipline
+            # as the code block.
+            "language": lang,
+            "case_explanation": str(result.get("case_explanation", "")
+                                    or result.get("explanation", "")),
+            "verifies": str(result.get("verifies", "")),
+            "improvements": improvements,
+            "next_case_suggestion": str(result.get("next_case_suggestion", "")),
+            "status": status,
+            "errors": "",
+        },
+        extra_inputs=inputs,
+        extra_outputs=outputs,
+    )
+
+
+def _simple_post_silicon_verification_response(
+    body: PostSiliconVerificationGenerateRequest, error: str = "",
+) -> dict:
+    """Fallback: a port-complete block with no generated case."""
+    name = body.block_name.replace(" ", "_")
+    what = (body.explanation or "").strip() or (body.description or "").strip()
+    return _generated_envelope(
+        block_type="post_silicon_verification",
+        name=name,
+        category=body.category or "general",
+        description=body.description or what,
+        inputs={
+            "explanation": what,
+            "language": body.language or "c",
+            "constraints": body.constraints,
+            "coverage_goals": body.coverage_goals,
+            "previous_case": body.previous_case,
+            "feedback": body.feedback,
+        },
+        outputs={
+            # Keep any case the block already had: a failed generation must not
+            # destroy the one thing on the block that was working.
+            "code": body.previous_case,
+            "language": body.language or "c",
+            "status": "error" if error else "",
+            "errors": error,
+        },
+        extra_inputs=body.inputs,
+        extra_outputs=body.outputs,
+    )
+
+
+@router.post("/generate/post_silicon_verification")
+async def generate_post_silicon_verification_block(
+    body: PostSiliconVerificationGenerateRequest,
+    user: CurrentUser,
+) -> dict:
+    """Generate a post-silicon verification case using AI, with fallback.
+
+    Serves the manual UnifiedWindow creation path and the app's Run/Regenerate
+    buttons. Without a key, or on failure, returns a port-complete stub whose
+    ``errors``/``status`` ports say why.
+    """
+    settings = get_settings()
+    if not settings.openai_api_key and not getattr(settings, "anthropic_api_key", ""):
+        log.info(
+            "blocks_generate_post_silicon_fallback",
+            reason="no_llm_key", block=body.block_name,
+        )
+        return _simple_post_silicon_verification_response(body, error="AI not configured")
+    try:
+        result = await generate_post_silicon_verification_payload(
+            block_name=body.block_name,
+            category=body.category,
+            description=body.description,
+            explanation=body.explanation,
+            language=body.language,
+            constraints=body.constraints,
+            coverage_goals=body.coverage_goals,
+            previous_case=body.previous_case,
+            feedback=body.feedback,
+            inputs=body.inputs,
+            outputs=body.outputs,
+            model=body.run_llm_model or None,
+        )
+        if result is None:
+            return _simple_post_silicon_verification_response(
+                body, error="AI not configured")
+        log.info(
+            "blocks_generate_post_silicon_ok",
+            block=body.block_name, language=body.language,
+        )
+        return result
+    except Exception as exc:
+        log.error(
+            "blocks_generate_post_silicon_error",
+            block=body.block_name, error=str(exc),
+        )
+        return _simple_post_silicon_verification_response(body, error=str(exc))
+
+
 # ── Scaffold-only blocks (no AI call, never need a key) ─────────────────────────
 #
 # Several block types produce their real content at *Run* time, not at creation:
@@ -2999,6 +3344,71 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         seed_map={"code": "code", "fix": "fix", "language": "language"},
         seed_from_desc="fix",
         defaults={},
+    ),
+    # ── Post-silicon: the chip is real and cannot be changed ─────────────────
+    # Every type above verifies a design before it exists. This pair asks whether
+    # the silicon in front of you behaves, and how fast. It composes exactly like
+    # testbench -> verilator: one block writes the case, the other runs it, and
+    # neither calls the other.
+    #   post_silicon_verification.code     -> cpu.code
+    #   post_silicon_verification.language -> cpu.language
+    #   post_silicon_verification.verifies -> cpu.spec
+    #   cpu.analysis -> post_silicon_verification.feedback   (the return leg)
+    #
+    # "explanation" is IN only and "case_explanation" is its counterpart OUT.
+    # spec_hdl uses the same word at both ends and carries a comment defending it;
+    # here the two genuinely differ -- in is what the user wants verified, out is
+    # what the generated case actually does -- so they get different names rather
+    # than a defence.
+    #
+    # "verifies" is the claim the case makes about itself, and it is wired into
+    # the cpu block's `spec` port so the post-run review can judge a run against
+    # what the case set out to prove rather than against nothing.
+    #
+    # "improvements" here is written AT GENERATION TIME and says what would make
+    # this case better; it is not the post-run review, which is cpu.analysis. The
+    # two look alike and answer different questions -- the same split verilator
+    # draws between improvements_* and fix_*.
+    "post_silicon_verification": _ScaffoldSpec(
+        category_based=True,
+        inputs=("explanation", "language", "constraints", "coverage_goals",
+                "previous_case", "feedback"),
+        outputs=("code", "language", "case_explanation", "verifies",
+                 "improvements", "next_case_suggestion", "status", "errors"),
+        seed_map={"language": "language", "explanation": "explanation"},
+        seed_from_desc="explanation",
+        defaults={"language": "c"},
+    ),
+    # The runtime half: compile the case, run it many times, and report both the
+    # verdict and an honest measurement.
+    #
+    # `spec` is WIRE-ONLY -- deliberately absent from seed_map and defaults, for
+    # the same reason verilator's is. It carries what the case CLAIMS to verify,
+    # and seeding it would put a second copy of that claim on the canvas for the
+    # review to cite instead of the one the case was actually written from.
+    #
+    # `duration` is the mean, on its own port as a bare number so it wires
+    # straight into a plotter block with no adapter. `benchmark` carries the
+    # spread beside it, because a mean with no spread invites a comparison the
+    # data does not support. `machine` is separate from `benchmark` rather than
+    # buried inside it: on a CPU benchmark what it ran on is the one caveat that
+    # decides whether two numbers can be compared at all.
+    #
+    # `analysis` is the AI review of a finished run, the role `improvements_rtl`
+    # plays for verilator. Named `analysis` on the plotter's precedent: the
+    # silicon exists and cannot be improved, so the note is a reading of what
+    # happened. Advice about the CASE is addressed upstream, to the block above.
+    "cpu": _ScaffoldSpec(
+        category_based=True,
+        inputs=("spec", "code", "language", "args", "build_flags", "defines",
+                "include_dirs", "files", "repetitions", "warmup", "timeout",
+                "instance_type", "image", "api_keys"),
+        outputs=("status", "passed", "response", "results", "benchmark",
+                 "duration", "machine", "errors", "warnings", "log", "artifacts",
+                 "eda_id", "cost", "analysis"),
+        seed_map={"language": "language"},
+        defaults={"language": "cpp", "repetitions": "5", "warmup": "1",
+                  "build_flags": "-O2", "timeout": "900"},
     ),
 }
 
@@ -3539,7 +3949,10 @@ _IMPROVEMENTS_MAX_CHARS = 100_000
 # and `rtl` -- the sections the review is actually built from -- are the last
 # things to go.  Mirrors the client-side drop order deliberately.
 _IMPROVEMENTS_DROP_ORDER = (
-    "log", "sim_output", "reports", "artifacts", "coverage",
+    # `response` is the cpu block's program stdout, dropped alongside the other
+    # raw transcripts: `results` carries the same verdicts parsed out of it, and
+    # `benchmark` the numbers, so it is the least specific thing in a cpu review.
+    "log", "sim_output", "response", "reports", "artifacts", "coverage",
     # `warnings` and `lint` go before `testbench` because the diagnostics they
     # carry are now LOCATED AND EXPLAINED on `errors` and `failures`; dropping a
     # duplicated 4k beats dropping 12k of source nothing else carries.

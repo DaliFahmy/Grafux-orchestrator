@@ -90,6 +90,20 @@ class BlockType(str, Enum):
     # sky130A / gf180mcuD device models. Below the gate level, where everything
     # above stops: measurements, waveforms and an operating point, not pass/fail.
     ANALOGUE_SIMULATOR = "analogue_simulator"
+    # ── Post-silicon: after the chip comes back from the fab ──────────────────
+    # Everything above verifies a design that does not exist yet. These two ask
+    # the opposite question: the silicon is real and cannot be changed, so does it
+    # behave, and how fast?
+    #
+    # POST_SILICON_VERIFICATION writes the case. An explanation of what to check
+    # plus a language in, a runnable verification program out — together with what
+    # the case actually proves, what would make it better, and what to check next.
+    # It generates and nothing else; it never executes anything.
+    POST_SILICON_VERIFICATION = "post_silicon_verification"
+    # ...and CPU runs it: compile on a real CPU, execute it repeatedly, and report
+    # the verdict alongside an honest measurement of how long it took. The runtime
+    # half of the pair, exactly as verilator is to testbench.
+    CPU = "cpu"
 
 
 # block_type → Msg_config section name used for LLM prompt selection.
@@ -105,6 +119,7 @@ BLOCK_TYPE_SECTION: dict[str, str] = {
     BlockType.CODE_HDL.value: "create_code_hdl",
     BlockType.SPEC_HDL.value: "create_spec_hdl",
     BlockType.CODE_FIX.value: "create_code_fix",
+    BlockType.POST_SILICON_VERIFICATION.value: "create_post_silicon_verification",
 }
 
 # Msg_config section for REPAIRING an existing HDL design against failing tests.
@@ -160,6 +175,10 @@ EXPENSIVE_BLOCK_TYPES: frozenset[str] = frozenset({
     BlockType.OPENGCRAM.value,
     BlockType.ANALOGUE_SIMULATOR.value,
     BlockType.GPU.value,
+    # Rents a CPU pod per run. POST_SILICON_VERIFICATION is deliberately absent:
+    # it only calls a model, so metering it as a pod run would charge an agent
+    # against a budget meant for machines it never rented.
+    BlockType.CPU.value,
 })
 
 

@@ -503,6 +503,78 @@ async def _enrich_code_hdl_block(action: dict[str, Any], session_id: str) -> Enr
     return status
 
 
+async def _enrich_post_silicon_verification_block(
+    action: dict[str, Any], session_id: str,
+) -> EnrichStatus:
+    """Scaffold a post_silicon_verification block and, given an explanation, write the case.
+
+    Mirrors :func:`_enrich_code_hdl_block`, and for the same reason: what to
+    verify comes from the action's ``explanation`` seed or, failing that, the
+    description — "check the L1 writes back on eviction" IS the explanation in
+    practice. Without either, the block is scaffolded empty, ready to fill and Run.
+
+    The language defaults to C rather than to the chat's guess: a post-silicon
+    bring-up case is C far more often than anything else, and the cpu block
+    compiles exactly what this port says.
+    """
+    from app.modules.blocks.router import (
+        generate_post_silicon_verification_payload,
+        generate_scaffold_payload,
+    )
+
+    name = str(action.get("block_name", "")).strip()
+    if not name:
+        return ("ok", "")
+    category = str(action.get("category", "")).strip() or "general"
+    description = str(action.get("description", "")).strip()
+    explanation = str(action.get("explanation", "")).strip() or description
+    language = str(action.get("language", "")).strip() or "c"
+
+    result = None
+    status: EnrichStatus = ("ok", "")
+    if explanation:
+        try:
+            result = await generate_post_silicon_verification_payload(
+                block_name=name,
+                category=category,
+                description=description,
+                explanation=explanation,
+                language=language,
+                inputs=action.get("inputs") or [],
+                outputs=action.get("outputs") or [],
+            )
+        except ValueError as exc:
+            # A language the cpu block cannot run reached the block (the chat
+            # guessed "rust"). Scaffold it rather than failing the whole create:
+            # the user can pick a language on the block and Run.
+            log.warning("create_post_silicon_rejected", session_id=session_id,
+                        block=name, error=str(exc))
+            status = ("failed", str(exc))
+            language = "c"
+    if result is None:
+        result = await generate_scaffold_payload(
+            block_type="post_silicon_verification",
+            block_name=name,
+            category=category,
+            description=description,
+            inputs=action.get("inputs") or [],
+            outputs=action.get("outputs") or [],
+            seeds={"explanation": explanation, "language": language},
+        )
+        if explanation and status[0] == "ok":
+            status = ("failed", "AI not configured")
+    params = (result or {}).get("tool_calls", [{}])[0].get("params", {})
+    if params.get("output_ports"):
+        action["output_ports"] = params["output_ports"]
+    if params.get("input_ports"):
+        action["input_ports"] = params["input_ports"]
+    log.info(
+        "create_post_silicon_ok", session_id=session_id, block=name,
+        language=language, generated=bool(explanation) and status[0] == "ok",
+    )
+    return status
+
+
 async def _enrich_spec_hdl_block(action: dict[str, Any], session_id: str) -> EnrichStatus:
     """Scaffold a spec_hdl block's ports and write the specification from the description.
 
@@ -702,4 +774,11 @@ _ENRICHERS = {
     # Code repair in any language. Generates only when the chat supplied BOTH the
     # program and the order; a program usually arrives by wire, not by message.
     "code_fix": _enrich_code_fix_block,
+    # Post-silicon. The case IS AI content — a program derived from an
+    # explanation — so it generates at create time like testbench and code_hdl.
+    "post_silicon_verification": _enrich_post_silicon_verification_block,
+    # ...and the block that RUNS it is scaffold-only: the verdict, the benchmark
+    # and the logs all arrive at Run from a real CPU, so there is nothing for an
+    # LLM to draft here beyond the ports and their defaults.
+    "cpu": _enrich_scaffold_block,
 }

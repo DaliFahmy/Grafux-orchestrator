@@ -266,6 +266,19 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "feed its netlist. The verification loop is spec_hdl feeding "
                 "BOTH code_hdl and testbench, which both feed verilator; a plain code "
                 "block with language=verilog still works for canvases built that way. "
+                "- post_silicon_verification: write a program that verifies a REAL, "
+                "already-manufactured chip -- post-silicon validation, bring-up, "
+                "silicon checkout. Set 'explanation' to what must be checked and "
+                "'language' to c, cpp or python. Outputs the case plus what it "
+                "verifies and what to check next. It only WRITES the case; a cpu "
+                "block runs it. Not testbench, which tests RTL in a simulator "
+                "before tape-out.\n"
+                "- cpu: RUN a verification case on a real CPU and benchmark it "
+                "(duration, checks, logs). Wire a post_silicon_verification block's "
+                "code output into its 'code' input. Not gpu, which is for CUDA and "
+                "GPU workloads.\n"
+                "After tape-out the chain is post_silicon_verification -> cpu, the "
+                "post-silicon mirror of testbench -> verilator. "
                 "Create only the blocks asked for."
             ),
             "block_name": _str_prop("New block name (snake_case)."),
@@ -275,7 +288,10 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "For a 'code' or 'gpu' block: the programming language "
                 "(e.g. python, javascript, go, rust, c++, cuda). For a 'code_hdl' or "
                 "'spec_hdl' block: the hardware description language, one of verilog, "
-                "systemverilog or vhdl (defaults to systemverilog). "
+                "systemverilog or vhdl (defaults to systemverilog). For a "
+                "'post_silicon_verification' or 'cpu' block: one of c, cpp or python "
+                "(defaults to c) -- those are the only languages the cpu block can "
+                "compile and run. "
                 "Ignored for other types."
             ),
             "address": _str_prop(
