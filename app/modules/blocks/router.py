@@ -3406,7 +3406,10 @@ _SCAFFOLD_SPECS: dict[str, _ScaffoldSpec] = {
         outputs=("status", "passed", "response", "results", "benchmark",
                  "duration", "machine", "errors", "warnings", "log", "artifacts",
                  "eda_id", "cost", "analysis"),
-        seed_map={"language": "language"},
+        # instance_type is the machine Regenerate provisions -- the cpu block's
+        # counterpart of gpu's gpu_model. Unseeded, the port stays empty and the
+        # devices server's default (cpu3c-8) applies.
+        seed_map={"language": "language", "instance_type": "instance_type"},
         defaults={"language": "cpp", "repetitions": "5", "warmup": "1",
                   "build_flags": "-O2", "timeout": "900"},
     ),

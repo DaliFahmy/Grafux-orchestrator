@@ -170,6 +170,29 @@ async def test_scaffold_gpu_seeds_model_and_language():
 
 
 @pytest.mark.asyncio
+async def test_scaffold_cpu_seeds_the_machine():
+    """The cpu block's machine picker, reached by voice/text as gpu_model is for gpu."""
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="cpu", block_name="bench", description="cache writeback",
+        seeds={"instance_type": "cpu3g-16", "language": "c"},
+    )
+    ins = _ports(result["tool_calls"][0]["params"], "input")
+    assert ins["instance_type"]["port_content"] == "cpu3g-16"
+    assert ins["language"]["port_content"] == "c"
+
+
+@pytest.mark.asyncio
+async def test_scaffold_cpu_without_a_machine_leaves_the_server_default():
+    result = await blocks_router.generate_scaffold_payload(
+        block_type="cpu", block_name="bench", description="cache writeback",
+    )
+    ins = _ports(result["tool_calls"][0]["params"], "input")
+    # Empty, so the devices server's default (cpu3c-8) decides -- never a second
+    # copy of that default here to drift from it.
+    assert ins["instance_type"]["port_content"] == ""
+
+
+@pytest.mark.asyncio
 async def test_scaffold_devices_seeds_defaults():
     result = await blocks_router.generate_scaffold_payload(
         block_type="devices", block_name="pi", description="blink led",

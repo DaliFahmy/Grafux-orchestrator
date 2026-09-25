@@ -327,6 +327,14 @@ CANVAS_FUNCTION_DECLARATIONS: list[dict[str, Any]] = [
                 "For a 'gpu' block: the GPU model to provision (e.g. 'NVIDIA A100'). "
                 "Optional; ignored for other types."
             ),
+            "instance_type": _str_prop(
+                "For a 'cpu' block: the RunPod CPU machine to run and time the case "
+                "on, written <family>-<vcpus>. Families: cpu3c / cpu5c (compute, "
+                "2 GB per vCPU), cpu3g / cpu5g (general, 4 GB), cpu3m / cpu5m "
+                "(memory, 8 GB); 5 is the newer hardware generation. E.g. 'cpu3c-16' "
+                "for 16 compute vCPUs, 'cpu3g-8' for a general 8-vCPU machine. "
+                "Optional (defaults to cpu3c-8); ignored for other types."
+            ),
             "top": _str_prop(
                 "For a 'verilator', 'yosys', 'openroad', 'testbench', 'code_hdl' or "
                 "'spec_hdl' block: the top-level module name of the design (e.g. "
@@ -545,6 +553,8 @@ def function_call_to_action(
         for key in (
             "block_type", "block_name", "description", "category",
             "language", "address", "url", "gpu_model",
+            # cpu seed: the RunPod CPU machine, the cpu block's gpu_model.
+            "instance_type",
             # EDA seeds — see _SCAFFOLD_SEED_KEYS in enrichment.py. Forwarding them
             # here is what lets "create a yosys block for my counter on sky130"
             # land with top/pdk already filled instead of empty ports.
